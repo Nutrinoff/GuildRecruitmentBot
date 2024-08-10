@@ -1,0 +1,24 @@
+{
+  "name": "guildrecruitmentbot",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "dependencies": {
+    "@discordjs/rest": "^2.3.0",
+    "axios": "^1.7.3",
+    "discord.js": "^14.15.3",
+    "google-auth-library": "^9.13.0",
+    "googleapis": "^140.0.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.2.0",
+    "@types/ws": "^8.5.12",
+    "typescript": "^5.5.4"
+  }
+}

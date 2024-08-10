@@ -1,0 +1,26 @@
+# Node modules directory
+node_modules/
+
+# Build output
+dist/
+
+# Logs
+*.log
+
+# Environment files
+.env
+
+# TypeScript build information (if applicable)
+tsconfig.tsbuildinfo
+
+# OS-specific files
+.DS_Store
+Thumbs.db
+
+# IDE or editor settings
+.vscode/
+.idea/
+
+# Other files to ignore (customize as needed)
+*.tmp
+*.bak
