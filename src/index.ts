@@ -28,8 +28,9 @@ SHEET_RANGE: 'Form Responses 1!A:AG', // Replace with your sheet range
 IMAGE_COLUMN_HEADER: 'Guild Logo URL', // Replace with your column header for image URLs
 EXCLUDED_COLUMN_HEADER: 'Timestamp', // Replace with the column header to exclude
 
-THREAD_AGE_LIMIT_HOURS: 0.5, // Age limit for threads in hours (e.g., 7 hours)
-POLL_INTERVAL_MS: 20000 // Polling interval in milliseconds (e.g., 2000ms = 2 seconds)
+THREAD_AGE_LIMIT_HOURS: parseFloat(config.THREAD_AGE_LIMIT_HOURS), // Parse as float
+POLL_INTERVAL_MS: parseInt(config.POLL_INTERVAL_MS, 10), // Parse as integer
+MAX_ENTRY_AGE_DAYS: parseInt(config.MAX_ENTRY_AGE_DAYS, 10) // Parse as integer
 };
 
 // Initialize Discord client
@@ -76,6 +77,12 @@ function needsRepost(thread: ThreadChannel): boolean {
     return getThreadAge(thread) >= CONFIG.THREAD_AGE_LIMIT_HOURS;
 }
 
+function isEntryTooOld(timestamp: string): boolean {
+    const entryDate = DateTime.fromFormat(timestamp, 'MM/dd/yyyy HH:mm:ss');
+    const daysOld = DateTime.now().diff(entryDate, 'days').days;
+    return daysOld > CONFIG.MAX_ENTRY_AGE_DAYS;
+}
+
 // Google Sheets API Functions
 async function getSpreadsheetData(): Promise<any[][]> {
     try {
@@ -102,24 +109,46 @@ async function removeUnmatchedThreads(channel: ForumChannel) {
         const rows = await getSpreadsheetData();
         const headers = rows[0];
         const guildNameIndex = headers.indexOf('Guild Name');
+        const timestampIndex = headers.indexOf('Timestamp');
 
-        if (guildNameIndex === -1) {
-            console.error('Guild Name column not found in Google Sheets data.');
+        if (guildNameIndex === -1 || timestampIndex === -1) {
+            console.error('Required columns not found in Google Sheets data.');
             return;
         }
 
-        const validGuildNames = new Set(rows.slice(1).map(row => row[guildNameIndex]?.trim()));
-        const threadsToDelete = Array.from(threads.threads.values()).filter(thread => !validGuildNames.has(thread.name.trim()));
+        // Track entries that need removal due to being too old
+        const entriesToRemove = new Set<string>();
 
-        console.log(`[${channel.name}] ${threadsToDelete.length} threads to remove.`);
+        // Identify outdated entries and mark for removal
+        for (const row of rows.slice(1)) {
+            const timestamp = row[timestampIndex];
+            const guildName = row[guildNameIndex]?.trim();
 
-        for (const thread of threadsToDelete) {
-            try {
-                await thread.delete('No matching data in Google Sheets');
-                console.log(`[${channel.name}] Deleted thread: ${thread.name}`);
-            } catch (error) {
-                console.error(`Failed to delete thread ${thread.name}: ${error}`);
+            if (guildName && isEntryTooOld(timestamp)) {
+                // Only add to entriesToRemove if the thread exists
+                if (existingThreadNames.has(guildName)) {
+                    entriesToRemove.add(guildName);
+                    console.log(`[${channel.name}] Entry with timestamp ${timestamp} is older than ${CONFIG.MAX_ENTRY_AGE_DAYS} days and will be excluded.`);
+                }
             }
+        }
+
+        // Identify threads to delete
+        const threadsToDelete = Array.from(threads.threads.values()).filter(thread => entriesToRemove.has(thread.name.trim()));
+
+        if (threadsToDelete.length > 0) {
+            console.log(`[${channel.name}] ${threadsToDelete.length} threads to remove.`);
+
+            for (const thread of threadsToDelete) {
+                try {
+                    await thread.delete('No matching data in Google Sheets');
+                    console.log(`[${channel.name}] Deleted thread: ${thread.name} due to outdated entry.`);
+                } catch (error) {
+                    console.error(`Failed to delete thread ${thread.name}: ${error}`);
+                }
+            }
+        } else {
+            console.log(`[${channel.name}] No threads to remove.`);
         }
     } catch (error) {
         console.error(`Failed to remove unmatched threads: ${error}`);
@@ -147,14 +176,18 @@ async function repostOldestThread(allianceChannel: ForumChannel, hordeChannel: F
                     const rows = await getSpreadsheetData();
                     const headers = rows[0];
                     const guildNameIndex = headers.indexOf('Guild Name');
+                    const timestampIndex = headers.indexOf('Timestamp');
                     
-                    if (guildNameIndex === -1) {
-                        console.error('Guild Name column not found in Google Sheets data.');
+                    if (guildNameIndex === -1 || timestampIndex === -1) {
+                        console.error('Required columns not found in Google Sheets data.');
                         return;
                     }
 
                     const row = rows.slice(1).find(r => r[guildNameIndex]?.trim() === thread.name.trim());
                     if (!row) continue;
+
+                    // Skip reposting if the entry is too old
+                    if (isEntryTooOld(row[timestampIndex])) continue;
 
                     let messageContent = '';
                     const files: { attachment: Buffer; name: string }[] = [];
@@ -203,14 +236,17 @@ async function postNewEntries(allianceChannel: ForumChannel, hordeChannel: Forum
         const headers = rows[0];
         const factionIndex = headers.indexOf('Faction');
         const imageColumnIndex = headers.indexOf(CONFIG.IMAGE_COLUMN_HEADER);
-        const excludedColumnIndex = headers.indexOf(CONFIG.IMAGE_COLUMN_HEADER); // Ensure this is excluded
+        const timestampIndex = headers.indexOf('Timestamp');
+        const excludedColumnIndex = headers.indexOf(CONFIG.EXCLUDED_COLUMN_HEADER);
 
         let newPostsAdded = 0;
 
         for (const row of rows.slice(1)) {
             const threadName = row[headers.indexOf('Guild Name')];
             const faction = row[factionIndex]?.trim();
-            if (!threadName) continue;
+            const timestamp = row[timestampIndex]?.trim();
+            
+            if (!threadName || isEntryTooOld(timestamp)) continue;
 
             const targetChannel = faction === 'Alliance' ? allianceChannel : faction === 'Horde' ? hordeChannel : null;
             if (!targetChannel) continue;
