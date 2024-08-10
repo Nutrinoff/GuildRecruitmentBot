@@ -7,10 +7,10 @@ import { DateTime } from 'luxon'; // For date handling
 
 // Configuration
 const CONFIG = {
-DISCORD_TOKEN: 'REMOVED', // Replace with your Discord bot token
-ALLIANCE_CHANNEL_ID: '1271195660292460614', // Replace with your Alliance channel ID
-HORDE_CHANNEL_ID: '1271896202459480165', // Replace with your Horde channel ID
-SPREADSHEET_ID: '1tLvY5DuLQvzvpwH9douYaAzlD7lx4yywr2qnHDBDfJg', // Replace with your Google Spreadsheet ID
+DISCORD_TOKEN: 'BOT TOKEN', // Replace with your Discord bot token
+ALLIANCE_CHANNEL_ID: 'DISCORD CHANNEL ID', // Replace with your Alliance channel ID
+HORDE_CHANNEL_ID: 'DISCORD CHANNEL ID', // Replace with your Horde channel ID
+SPREADSHEET_ID: 'SPREADSHEET ID', // Replace with your Google Spreadsheet ID
 SHEET_RANGE: 'Form Responses 1!A:AG', // Replace with your sheet range
 IMAGE_COLUMN_HEADER: 'Guild Logo URL', // Replace with your column header for image URLs
 EXCLUDED_COLUMN_HEADER: 'Timestamp', // Replace with the column header to exclude
@@ -30,7 +30,7 @@ const client = new Client({
 
 // Initialize Google Sheets API
 const SCOPES = ['https://www.googleapis.com/auth/spreadsheets', 'https://www.googleapis.com/auth/drive'];
-const CREDENTIALS_PATH = path.join(__dirname, 'discord-guild-recruitment-bot-00307506ac94.json');
+const CREDENTIALS_PATH = path.join(__dirname, 'credentials.json');
 const credentials = JSON.parse(fs.readFileSync(CREDENTIALS_PATH, 'utf8'));
 
 const auth = new google.auth.JWT(
