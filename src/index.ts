@@ -5,18 +5,31 @@ import fs from 'fs';
 import path from 'path';
 import { DateTime } from 'luxon'; // For date handling
 
+// Load configuration from config.txt
+const configPath = path.resolve(__dirname, 'config.txt');
+const configData = fs.readFileSync(configPath, 'utf-8');
+
+// Parse the configuration
+const config: Record<string, string> = {};
+configData.split('\n').forEach(line => {
+  const [key, value] = line.split('=');
+  if (key && value) {
+    config[key.trim()] = value.trim();
+  }
+});
+
 // Configuration
 const CONFIG = {
-DISCORD_TOKEN: 'BOT TOKEN', // Replace with your Discord bot token
-ALLIANCE_CHANNEL_ID: 'DISCORD CHANNEL ID', // Replace with your Alliance channel ID
-HORDE_CHANNEL_ID: 'DISCORD CHANNEL ID', // Replace with your Horde channel ID
-SPREADSHEET_ID: 'SPREADSHEET ID', // Replace with your Google Spreadsheet ID
+DISCORD_TOKEN: config.DISCORD_TOKEN, // Replace with your Discord bot token
+ALLIANCE_CHANNEL_ID: config.ALLIANCE_CHANNEL_ID, // Replace with your Alliance channel ID
+HORDE_CHANNEL_ID: config.HORDE_CHANNEL_ID, // Replace with your Horde channel ID
+SPREADSHEET_ID: config.SPREADSHEET_ID, // Replace with your Google Spreadsheet ID
 SHEET_RANGE: 'Form Responses 1!A:AG', // Replace with your sheet range
 IMAGE_COLUMN_HEADER: 'Guild Logo URL', // Replace with your column header for image URLs
 EXCLUDED_COLUMN_HEADER: 'Timestamp', // Replace with the column header to exclude
 
-THREAD_AGE_LIMIT_HOURS: 0.5, // Age limit for threads in hours (e.g., 7 days)
-POLL_INTERVAL_MS: 20000 // Polling interval in milliseconds (e.g., 3 seconds)
+THREAD_AGE_LIMIT_HOURS: 0.5, // Age limit for threads in hours (e.g., 7 hours)
+POLL_INTERVAL_MS: 20000 // Polling interval in milliseconds (e.g., 2000ms = 2 seconds)
 };
 
 // Initialize Discord client
