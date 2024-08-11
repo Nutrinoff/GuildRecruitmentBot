@@ -160,68 +160,86 @@ async function removeUnmatchedThreads(channel: ForumChannel) {
     }
 }
 
+async function createGuildRecruitmentThread(channel: ForumChannel, threadTitle: string, messageOptions: MessageCreateOptions) {
+    try {
+        const thread = await channel.threads.create({
+            name: threadTitle || 'No Title',
+            autoArchiveDuration: 60,
+            reason: 'Creating thread for recruitment post',
+            message: messageOptions,
+        });
+        return thread;
+    } catch (error) {
+        console.error(`Failed to create thread: ${error}`);
+        throw error;
+    }
+}
+
+async function generateMessageContent(headers: string[], row: string[]): Promise<MessageCreateOptions> {
+    let messageContent = '';
+    const files: { attachment: Buffer; name: string }[] = [];
+    
+    const imageColumnIndex = getImageColumnIndex(headers);
+
+    for (let j = 1; j < row.length; j++) {
+        const key = headers[j];
+        const value = row[j];
+        if (key.includes('Guild Logo')) continue; // Exclude any header containing "Guild Logo"
+        if (value) messageContent += `**${key}**: ${value}\n`;
+    }
+
+    if (imageColumnIndex !== -1 && row[imageColumnIndex]?.startsWith('http')) {
+        const imageData = await fetchImage(row[imageColumnIndex]);
+        if (imageData) {
+            files.push({ attachment: imageData, name: `image${files.length + 1}.png` });
+        }
+    }
+
+    return { content: messageContent, files };
+}
+
+async function handleThreadReposting(channel: ForumChannel, thread: ThreadChannel, row: string[], headers: string[]) {
+    await thread.delete('Reposting new thread');
+    console.log(`[${channel.name}] Deleted old thread for reposting: ${thread.name}`);
+
+    const messageOptions = await generateMessageContent(headers, row);
+    await createGuildRecruitmentThread(channel, thread.name, messageOptions);
+    console.log(`[${channel.name}] Reposted thread: ${thread.name}`);
+}
+
+async function fetchAndFilterThreads(channel: ForumChannel, filterCondition: (thread: ThreadChannel) => boolean): Promise<ThreadChannel[]> {
+    const threads = await channel.threads.fetchActive();
+    return Array.from(threads.threads.values()).filter(filterCondition);
+}
+
 async function repostOldestThread(allianceChannel: ForumChannel, hordeChannel: ForumChannel) {
     async function handleReposting(channel: ForumChannel) {
         console.log(`\n\nStarting to check ${channel.name} for threads that need reposting...`);
 
         try {
-            const threads = await channel.threads.fetchActive();
-            const sortedThreads = Array.from(threads.threads.values()).sort((a, b) => getThreadAge(a) - getThreadAge(b));
-            
-            const threadsOverAgeLimit = sortedThreads.filter(thread => needsRepost(thread));
-            console.log(`[${channel.name}] Found ${threadsOverAgeLimit.length} threads over the age limit.`);
+            const threads = await fetchAndFilterThreads(channel, thread => needsRepost(thread));
+            console.log(`[${channel.name}] Found ${threads.length} threads over the age limit.`);
+
+            const rows = await getSpreadsheetData();
+            const headers = rows[0];
+            const guildNameIndex = headers.indexOf('Guild Name');
+
+            if (guildNameIndex === -1) {
+                console.error('Required columns not found in Google Sheets data.');
+                return;
+            }
 
             let repostedCount = 0;
 
-            for (const thread of sortedThreads) {
-                if (needsRepost(thread)) {
-                    await thread.delete('Reposting new thread');
-                    console.log(`[${channel.name}] Deleted old thread for reposting: ${thread.name}`);
-                    
-                    const rows = await getSpreadsheetData();
-                    const headers = rows[0];
-                    const guildNameIndex = headers.indexOf('Guild Name');
-                    const timestampIndex = headers.indexOf('Timestamp');
-                    const imageColumnIndex = getImageColumnIndex(headers); // Find the index of the image column
-                    
-                    if (guildNameIndex === -1 || timestampIndex === -1) {
-                        console.error('Required columns not found in Google Sheets data.');
-                        return;
-                    }
+            for (const thread of threads) {
+                const row = rows.slice(1).find(r => r[guildNameIndex]?.trim() === thread.name.trim());
+                if (!row || isEntryTooOld(row[headers.indexOf('Timestamp')])) continue;
 
-                    const row = rows.slice(1).find(r => r[guildNameIndex]?.trim() === thread.name.trim());
-                    if (!row) continue;
-
-                    // Skip reposting if the entry is too old
-                    if (isEntryTooOld(row[timestampIndex])) continue;
-
-                    let messageContent = '';
-                    const files: { attachment: Buffer; name: string }[] = [];
-
-                    for (let j = 1; j < row.length; j++) {
-                        const key = headers[j];
-                        const value = row[j];
-                        if (key.includes('Guild Logo')) continue; // Exclude any header containing "Guild Logo"
-                        if (value) messageContent += `**${key}**: ${value}\n`;
-                    }
-
-                    if (imageColumnIndex !== -1 && row[imageColumnIndex] && row[imageColumnIndex].startsWith('http')) {
-                        const imageData = await fetchImage(row[imageColumnIndex]);
-                        if (imageData) {
-                            files.push({ attachment: imageData, name: `image${files.length + 1}.png` });
-                        }
-                    }
-
-                    if (messageContent.trim() || files.length) {
-                        const messageOptions: MessageCreateOptions = { content: messageContent, files };
-                        await createGuildRecruitmentThread(channel, thread.name, messageOptions);
-                        console.log(`[${channel.name}] Reposted thread: ${thread.name}`);
-                        repostedCount++;
-                    }
-                    break;
-                }
+                await handleThreadReposting(channel, thread, row, headers);
+                repostedCount++;
+                break; // Repost only the oldest thread
             }
-            
+
             console.log(`[${channel.name}] Total reposted threads: ${repostedCount}`);
         } catch (error) {
             console.error(`Failed to handle reposting: ${error}`);
@@ -239,49 +257,26 @@ async function postNewEntries(allianceChannel: ForumChannel, hordeChannel: Forum
         const rows = await getSpreadsheetData();
         const headers = rows[0];
         const factionIndex = headers.indexOf('Faction');
-        const timestampIndex = headers.indexOf('Timestamp');
-        const excludedColumnIndex = headers.indexOf(CONFIG.EXCLUDED_COLUMN_HEADER);
-        const imageColumnIndex = getImageColumnIndex(headers); // Find the index of the image column
 
         let newPostsAdded = 0;
 
         for (const row of rows.slice(1)) {
             const threadName = row[headers.indexOf('Guild Name')];
             const faction = row[factionIndex]?.trim();
-            const timestamp = row[timestampIndex]?.trim();
-            
+            const timestamp = row[headers.indexOf('Timestamp')]?.trim();
+
             if (!threadName || isEntryTooOld(timestamp)) continue;
 
             const targetChannel = faction === 'Alliance' ? allianceChannel : faction === 'Horde' ? hordeChannel : null;
             if (!targetChannel) continue;
 
-            const existingThreads = await targetChannel.threads.fetchActive();
-            const existingThreadNames = new Set(Array.from(existingThreads.threads.values()).map(thread => thread.name.trim()));
+            const existingThreads = await fetchAndFilterThreads(targetChannel, thread => thread.name.trim() === threadName.trim());
 
-            if (!existingThreadNames.has(threadName)) {
-                let messageContent = '';
-                const files: { attachment: Buffer; name: string }[] = [];
-
-                for (let j = 1; j < row.length; j++) {
-                    const key = headers[j];
-                    const value = row[j];
-                    if (key.includes('Guild Logo')) continue; // Exclude any header containing "Guild Logo"
-                    if (value) messageContent += `**${key}**: ${value}\n`;
-                }
-
-                if (imageColumnIndex !== -1 && row[imageColumnIndex] && row[imageColumnIndex].startsWith('http')) {
-                    const imageData = await fetchImage(row[imageColumnIndex]);
-                    if (imageData) {
-                        files.push({ attachment: imageData, name: `image${files.length + 1}.png` });
-                    }
-                }
-
-                if (messageContent.trim() || files.length) {
-                    const messageOptions: MessageCreateOptions = { content: messageContent, files };
-                    await createGuildRecruitmentThread(targetChannel, threadName, messageOptions);
-                    console.log(`[${targetChannel.name}] Added new thread: ${threadName}`);
-                    newPostsAdded++;
-                }
+            if (existingThreads.length === 0) {
+                const messageOptions = await generateMessageContent(headers, row);
+                await createGuildRecruitmentThread(targetChannel, threadName, messageOptions);
+                console.log(`[${targetChannel.name}] Added new thread: ${threadName}`);
+                newPostsAdded++;
             }
         }
 
@@ -292,21 +287,6 @@ async function postNewEntries(allianceChannel: ForumChannel, hordeChannel: Forum
         }
     } catch (error) {
         console.error(`Failed to post new entries: ${error}`);
-    }
-}
-
-async function createGuildRecruitmentThread(channel: ForumChannel, threadTitle: string, messageOptions: MessageCreateOptions) {
-    try {
-        const thread = await channel.threads.create({
-            name: threadTitle || 'No Title',
-            autoArchiveDuration: 60,
-            reason: 'Creating thread for recruitment post',
-            message: messageOptions,
-        });
-        return thread;
-    } catch (error) {
-        console.error(`Failed to create thread: ${error}`);
-        throw error;
     }
 }
 
