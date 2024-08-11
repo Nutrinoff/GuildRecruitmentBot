@@ -25,7 +25,7 @@ ALLIANCE_CHANNEL_ID: config.ALLIANCE_CHANNEL_ID, // Replace with your Alliance c
 HORDE_CHANNEL_ID: config.HORDE_CHANNEL_ID, // Replace with your Horde channel ID
 SPREADSHEET_ID: config.SPREADSHEET_ID, // Replace with your Google Spreadsheet ID
 SHEET_RANGE: 'Form Responses 1!A:AG', // Replace with your sheet range
-IMAGE_COLUMN_HEADER: 'Guild Logo URL', // Replace with your column header for image URLs
+IMAGE_COLUMN_HEADER: 'Guild Logo', // Replace with your column header for image URLs
 EXCLUDED_COLUMN_HEADER: 'Timestamp', // Replace with the column header to exclude
 
 THREAD_AGE_LIMIT_HOURS: parseFloat(config.THREAD_AGE_LIMIT_HOURS), // Parse as float
@@ -65,6 +65,11 @@ async function fetchImage(url: string): Promise<Buffer | null> {
         console.error(`Failed to fetch image from ${url}: ${error}`);
         return null;
     }
+}
+
+// Function to find the correct image column index dynamically
+function getImageColumnIndex(headers: string[]): number {
+    return headers.findIndex(header => header.includes(CONFIG.IMAGE_COLUMN_HEADER));
 }
 
 function getThreadAge(thread: ThreadChannel): number {
@@ -177,6 +182,7 @@ async function repostOldestThread(allianceChannel: ForumChannel, hordeChannel: F
                     const headers = rows[0];
                     const guildNameIndex = headers.indexOf('Guild Name');
                     const timestampIndex = headers.indexOf('Timestamp');
+                    const imageColumnIndex = getImageColumnIndex(headers); // Find the index of the image column
                     
                     if (guildNameIndex === -1 || timestampIndex === -1) {
                         console.error('Required columns not found in Google Sheets data.');
@@ -192,11 +198,10 @@ async function repostOldestThread(allianceChannel: ForumChannel, hordeChannel: F
                     let messageContent = '';
                     const files: { attachment: Buffer; name: string }[] = [];
 
-                    const imageColumnIndex = headers.indexOf(CONFIG.IMAGE_COLUMN_HEADER);
                     for (let j = 1; j < row.length; j++) {
                         const key = headers[j];
                         const value = row[j];
-                        if (key === CONFIG.EXCLUDED_COLUMN_HEADER || j === imageColumnIndex) continue;
+                        if (key.includes('Guild Logo')) continue; // Exclude any header containing "Guild Logo"
                         if (value) messageContent += `**${key}**: ${value}\n`;
                     }
 
@@ -227,7 +232,6 @@ async function repostOldestThread(allianceChannel: ForumChannel, hordeChannel: F
     await handleReposting(hordeChannel);
 }
 
-
 async function postNewEntries(allianceChannel: ForumChannel, hordeChannel: ForumChannel) {
     try {
         console.log('\n\nStarting to check for new entries to post...');
@@ -235,9 +239,9 @@ async function postNewEntries(allianceChannel: ForumChannel, hordeChannel: Forum
         const rows = await getSpreadsheetData();
         const headers = rows[0];
         const factionIndex = headers.indexOf('Faction');
-        const imageColumnIndex = headers.indexOf(CONFIG.IMAGE_COLUMN_HEADER);
         const timestampIndex = headers.indexOf('Timestamp');
         const excludedColumnIndex = headers.indexOf(CONFIG.EXCLUDED_COLUMN_HEADER);
+        const imageColumnIndex = getImageColumnIndex(headers); // Find the index of the image column
 
         let newPostsAdded = 0;
 
@@ -261,7 +265,7 @@ async function postNewEntries(allianceChannel: ForumChannel, hordeChannel: Forum
                 for (let j = 1; j < row.length; j++) {
                     const key = headers[j];
                     const value = row[j];
-                    if (key === CONFIG.EXCLUDED_COLUMN_HEADER || j === imageColumnIndex || j === excludedColumnIndex) continue;
+                    if (key.includes('Guild Logo')) continue; // Exclude any header containing "Guild Logo"
                     if (value) messageContent += `**${key}**: ${value}\n`;
                 }
 
