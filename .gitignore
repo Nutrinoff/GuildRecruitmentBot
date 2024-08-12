@@ -24,3 +24,4 @@ Thumbs.db
 # Other files to ignore (customize as needed)
 *.tmp
 *.bak
+discord-credentials.json

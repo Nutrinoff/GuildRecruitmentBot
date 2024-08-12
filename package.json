@@ -10,13 +10,16 @@
   "license": "ISC",
   "description": "",
   "dependencies": {
+    "@discordjs/builders": "^1.8.2",
     "@discordjs/rest": "^2.3.0",
     "axios": "^1.7.3",
     "discord.js": "^14.15.3",
     "google-auth-library": "^9.13.0",
-    "googleapis": "^140.0.1"
+    "googleapis": "^140.0.1",
+    "luxon": "^3.5.0"
   },
   "devDependencies": {
+    "@types/luxon": "^3.4.2",
     "@types/node": "^22.2.0",
     "@types/ws": "^8.5.12",
     "typescript": "^5.5.4"
