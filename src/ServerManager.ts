@@ -4,6 +4,7 @@ import {
     ThreadChannel,
     MessageCreateOptions,
     GatewayIntentBits,
+    RateLimitError
 } from 'discord.js';
 import axios from 'axios';
 import { google } from 'googleapis';
@@ -24,10 +25,8 @@ interface Config {
     MAX_ENTRY_AGE_DAYS: number;
 }
 
-// Example function to add color to text
 const colorize = (text: string, colorCode: string): string => `\x1b[${colorCode}m${text}\x1b[0m`;
 
-// Define color codes
 const COLORS = {
     RED: '31',
     GREEN: '32',
@@ -36,6 +35,10 @@ const COLORS = {
     MAGENTA: '35',
     CYAN: '36',
     WHITE: '37',
+};
+
+const getRateLimitDelay = (error: RateLimitError): number => {
+    return error.retryAfter || 10000; // Default to 10 seconds if not specified
 };
 
 export class ServerManager {
@@ -49,8 +52,10 @@ export class ServerManager {
         config: Config
     ) {
         this.config = config;
+        this.initializeGoogleSheetsAPI();
+    }
 
-        // Initialize Google Sheets API
+    private initializeGoogleSheetsAPI() {
         const SCOPES = ['https://www.googleapis.com/auth/spreadsheets', 'https://www.googleapis.com/auth/drive'];
         const CREDENTIALS_PATH = path.join(__dirname, 'credentials.json');
         const credentials = JSON.parse(fs.readFileSync(CREDENTIALS_PATH, 'utf8'));
@@ -66,8 +71,16 @@ export class ServerManager {
     }
 
     public updateChannels(allianceChannelId: string, hordeChannelId: string) {
-    this.allianceChannelId = allianceChannelId;
-    this.hordeChannelId = hordeChannelId;
+        this.allianceChannelId = allianceChannelId;
+        this.hordeChannelId = hordeChannelId;
+    }
+
+    private async handleRateLimit(response: any) {
+        if (response.status === 429) { // Rate limit hit
+            const retryAfter = parseInt(response.headers['retry-after'] || '10000', 10); // Default to 10 seconds if not specified
+            console.warn(`Rate limit hit! Waiting for ${retryAfter}ms before retrying...`);
+            await new Promise(resolve => setTimeout(resolve, retryAfter)); // Wait before retrying
+        }
     }
 
     private async getSpreadsheetData(): Promise<any[][]> {
@@ -76,6 +89,7 @@ export class ServerManager {
                 spreadsheetId: this.config.SPREADSHEET_ID,
                 range: this.config.SHEET_RANGE,
             });
+            await this.handleRateLimit(response);
             return response.data.values || [];
         } catch (error) {
             console.error(`Failed to fetch data from Google Sheets: ${error}`);
@@ -86,6 +100,7 @@ export class ServerManager {
     private async fetchImage(url: string): Promise<Buffer | null> {
         try {
             const response = await axios.get(url, { responseType: 'arraybuffer' });
+            await this.handleRateLimit(response);
             return Buffer.from(response.data);
         } catch (error) {
             console.error(`Failed to fetch image from ${url}: ${error}`);
@@ -99,8 +114,7 @@ export class ServerManager {
 
     private getThreadAge(thread: ThreadChannel): number {
         const createdAt = thread.createdAt;
-        if (!createdAt) return -1;
-        return DateTime.now().diff(DateTime.fromJSDate(createdAt), 'hours').hours;
+        return createdAt ? DateTime.now().diff(DateTime.fromJSDate(createdAt), 'hours').hours : -1;
     }
 
     private needsRepost(thread: ThreadChannel): boolean {
@@ -109,17 +123,15 @@ export class ServerManager {
 
     private isEntryTooOld(timestamp: string): boolean {
         const entryDate = DateTime.fromFormat(timestamp, 'MM/dd/yyyy HH:mm:ss');
-        const daysOld = DateTime.now().diff(entryDate, 'days').days;
-        return daysOld > this.config.MAX_ENTRY_AGE_DAYS;
+        return DateTime.now().diff(entryDate, 'days').days > this.config.MAX_ENTRY_AGE_DAYS;
     }
 
     public async removeUnmatchedThreads(channel: ForumChannel) {
         try {
-            // Fetch the active threads in the forum channel
+            console.log(colorize(`\n\nStarting to check ${channel.name} for threads without Google Sheet...`, COLORS.YELLOW));
             const threads = await channel.threads.fetchActive();
             const existingThreadNames = new Set(Array.from(threads.threads.values()).map(thread => thread.name.trim().toLowerCase()));
     
-            // Fetch data from Google Sheets
             const rows = await this.getSpreadsheetData();
             const headers = rows[0];
             const guildNameIndex = headers.indexOf('Guild Name');
@@ -130,8 +142,7 @@ export class ServerManager {
                 return;
             }
     
-            // Collect the guild names and their timestamps from the Google Sheet
-            const sheetEntries = new Map<string, string>(); // Map of guild names to timestamps
+            const sheetEntries = new Map<string, string>();
             for (const row of rows.slice(1)) {
                 const guildName = row[guildNameIndex]?.trim().toLowerCase();
                 const timestamp = row[timestampIndex]?.trim();
@@ -140,7 +151,6 @@ export class ServerManager {
                 }
             }
     
-            // Identify threads to remove
             const threadsToDelete = Array.from(threads.threads.values()).filter(thread => {
                 const threadName = thread.name.trim().toLowerCase();
                 const threadTimestamp = sheetEntries.get(threadName);
@@ -148,7 +158,6 @@ export class ServerManager {
                 return !sheetEntries.has(threadName) || isOld;
             });
     
-            // Delete the unmatched or outdated threads
             if (threadsToDelete.length > 0) {
                 console.log(colorize(`[${channel.name}] ${threadsToDelete.length} threads to remove.`, COLORS.YELLOW));
                 for (const thread of threadsToDelete) {
@@ -166,23 +175,31 @@ export class ServerManager {
             console.error(`Failed to remove unmatched threads: ${error}`);
         }
     }
-    
-    
 
     private async createGuildRecruitmentThread(channel: ForumChannel, threadTitle: string, messageOptions: MessageCreateOptions) {
+        const timeoutDuration = 15000; // Timeout duration in milliseconds (15 seconds)
+    
         try {
-            const thread = await channel.threads.create({
+            const threadCreationPromise = channel.threads.create({
                 name: threadTitle || 'No Title',
                 autoArchiveDuration: 60,
                 reason: 'Creating thread for recruitment post',
                 message: messageOptions,
             });
-            return thread;
-        } catch (error) {
-            console.error(`Failed to create thread: ${error}`);
-            throw error;
+    
+            // Add timeout to the thread creation promise
+            const timeoutPromise = new Promise<ThreadChannel>((_, reject) =>
+                setTimeout(() => reject(new Error('Thread creation timed out')), timeoutDuration)
+            );
+    
+            return await Promise.race([threadCreationPromise, timeoutPromise]);
+        } catch {
+            // Gracefully exit without logging error
+            return;
         }
     }
+    
+    
 
     private async generateMessageContent(headers: string[], row: string[]): Promise<MessageCreateOptions> {
         let messageContent = '';
@@ -193,7 +210,7 @@ export class ServerManager {
         for (let j = 1; j < row.length; j++) {
             const key = headers[j];
             const value = row[j];
-            if (key.includes('Guild Logo')) continue; // Exclude any header containing "Guild Logo"
+            if (key.includes(this.config.EXCLUDED_COLUMN_HEADER)) continue; // Exclude any header containing the specified text
             if (value) messageContent += `**${key}**: ${value}\n`;
         }
 
@@ -208,12 +225,16 @@ export class ServerManager {
     }
 
     private async handleThreadReposting(channel: ForumChannel, thread: ThreadChannel, row: string[], headers: string[]) {
-        await thread.delete('Reposting new thread');
-        console.log(`[${channel.name}] Deleted old thread for reposting: ${thread.name}`);
-
-        const messageOptions = await this.generateMessageContent(headers, row);
-        await this.createGuildRecruitmentThread(channel, thread.name, messageOptions);
-        console.log(`[${channel.name}] Reposted thread: ${thread.name}`);
+        try {
+            await thread.delete('Reposting new thread');
+            console.log(`[${channel.name}] Deleted old thread for reposting: ${thread.name}`);
+    
+            const messageOptions = await this.generateMessageContent(headers, row);
+            await this.createGuildRecruitmentThread(channel, thread.name, messageOptions);
+            console.log(colorize(`[${channel.name}] Reposted thread: ${thread.name}`, COLORS.GREEN));
+        } catch (error) {
+            console.error(`Failed to handle thread reposting: ${error}`);
+        }
     }
 
     private async fetchAndFilterThreads(channel: ForumChannel, filterCondition: (thread: ThreadChannel) => boolean): Promise<ThreadChannel[]> {
@@ -221,74 +242,188 @@ export class ServerManager {
         return Array.from(threads.threads.values()).filter(filterCondition);
     }
 
+    public async removeDuplicateThreads(channel: ForumChannel) {
+        try {
+            console.log(colorize(`\n\nStarting to check ${channel.name} for duplicate threads...`, COLORS.YELLOW));
+
+            const threads = await channel.threads.fetchActive();
+            const threadsByTitle = new Map<string, ThreadChannel[]>();
+
+            // Group threads by title
+            for (const thread of threads.threads.values()) {
+                const title = thread.name.trim().toLowerCase();
+                if (!threadsByTitle.has(title)) {
+                    threadsByTitle.set(title, []);
+                }
+                threadsByTitle.get(title)!.push(thread);
+            }
+
+            // Identify and delete duplicates, keeping only one thread per title
+            let duplicatesRemoved = 0;
+            for (const [title, threadList] of threadsByTitle) {
+                if (threadList.length > 1) {
+                    // Keep the first thread, delete the rest
+                    for (const thread of threadList.slice(1)) {
+                        try {
+                            await thread.delete('Duplicate thread');
+                            console.log(colorize(`[${channel.name}] Deleted duplicate thread: ${thread.name}`, COLORS.GREEN));
+                            duplicatesRemoved++;
+                        } catch (error) {
+                            console.error(`Failed to delete duplicate thread ${thread.name}: ${error}`);
+                        }
+                    }
+                }
+            }
+
+            if (duplicatesRemoved === 0) {
+                console.log(`[${channel.name}] No duplicate threads to remove.`);
+            } else {
+                console.log(`[${channel.name}] Total duplicate threads removed: ${duplicatesRemoved}`);
+            }
+        } catch (error) {
+            console.error(`Failed to remove duplicate threads: ${error}`);
+        }
+    }
+
     public async repostOldestThread(allianceChannel: ForumChannel, hordeChannel: ForumChannel) {
         async function handleReposting(channel: ForumChannel, config: Config, manager: ServerManager) {
-            console.log(`\n\nStarting to check ${channel.name} for threads that need reposting...`);
-
+            let repostedCount = 0;
+            let hasTimeoutOccurred = false;
+    
+            const timeoutDuration = 10000; // Timeout duration in milliseconds (10 seconds)
+    
+            console.log(colorize(`\n\nStarting to check ${channel.name} for threads that need reposting...`, COLORS.YELLOW));
+    
             try {
-                const threads = await manager.fetchAndFilterThreads(channel, thread => manager.needsRepost(thread));
+                const threadsPromise = manager.fetchAndFilterThreads(channel, thread => manager.needsRepost(thread));
+                const timeoutPromise = new Promise<ThreadChannel[]>((_, reject) =>
+                    setTimeout(() => reject(new Error('Fetching threads timed out')), timeoutDuration)
+                );
+    
+                const threads = await Promise.race([threadsPromise, timeoutPromise]);
+    
                 console.log(`[${channel.name}] Found ${threads.length} threads over the age limit.`);
-
+    
                 const rows = await manager.getSpreadsheetData();
                 const headers = rows[0];
                 const guildNameIndex = headers.indexOf('Guild Name');
-
+    
                 if (guildNameIndex === -1) {
                     console.error('Required columns not found in Google Sheets data.');
                     return;
                 }
-
-                let repostedCount = 0;
-
+    
                 for (const thread of threads) {
+                    if (hasTimeoutOccurred) break; // Exit loop if timeout has occurred
+    
                     const row = rows.slice(1).find(r => r[guildNameIndex]?.trim() === thread.name.trim());
                     if (!row || manager.isEntryTooOld(row[headers.indexOf('Timestamp')])) continue;
-
-                    await manager.handleThreadReposting(channel, thread, row, headers);
-                    repostedCount++;
-                    break; // Repost only the oldest thread
+    
+                    try {
+                        const repostPromise = manager.handleThreadReposting(channel, thread, row, headers);
+                        const repostTimeoutPromise = new Promise<void>((_, reject) =>
+                            setTimeout(() => reject(new Error('Reposting thread timed out')), timeoutDuration)
+                        );
+    
+                        await Promise.race([repostPromise, repostTimeoutPromise]);
+                        repostedCount++;
+                        break; // Repost only the oldest thread
+                    } catch (error) {
+                        if (error instanceof Error) {
+                            if (error.message.includes('Reposting thread timed out')) {
+                                console.error('Reposting thread timed out due to rate limit. Stopping further reposts.');
+                                hasTimeoutOccurred = true; // Flag timeout occurrence
+                                break; // Exit loop if timeout occurs
+                            } else if (error instanceof RateLimitError) {
+                                const delay = getRateLimitDelay(error);
+                                console.warn(`Rate limit error while reposting in ${channel.name}: ${error.message}`);
+                                await new Promise(resolve => setTimeout(resolve, delay));
+                            } else {
+                                console.error(`Failed to repost thread: ${error.message}`);
+                                continue; // Continue to the next thread if error persists
+                            }
+                        } else {
+                            console.error(`An unknown error occurred: ${String(error)}`);
+                        }
+                    }
                 }
-
+    
                 console.log(`[${channel.name}] Total reposted threads: ${repostedCount}`);
             } catch (error) {
                 console.error(`Failed to handle reposting: ${error}`);
             }
         }
-
+    
         await handleReposting(allianceChannel, this.config, this);
         await handleReposting(hordeChannel, this.config, this);
     }
 
     public async postNewEntries(allianceChannel: ForumChannel, hordeChannel: ForumChannel) {
+        let newPostsAdded = 0;
+        let hasTimeoutOccurred = false;
+    
         try {
-            console.log('\n\nStarting to check for new entries to post...');
-
+            console.log(colorize('\n\nStarting to check for new entries to post...', COLORS.YELLOW));
+    
             const rows = await this.getSpreadsheetData();
             const headers = rows[0];
             const factionIndex = headers.indexOf('Faction');
-
-            let newPostsAdded = 0;
-
+            const guildNameIndex = headers.indexOf('Guild Name');
+            const timestampIndex = headers.indexOf('Timestamp');
+    
+            if (factionIndex === -1 || guildNameIndex === -1 || timestampIndex === -1) {
+                console.error('Required columns not found in Google Sheets data.');
+                return;
+            }
+    
             for (const row of rows.slice(1)) {
-                const threadName = row[headers.indexOf('Guild Name')];
+                if (hasTimeoutOccurred) break; // Exit loop if timeout has occurred
+    
+                const threadName = row[guildNameIndex]?.trim();
                 const faction = row[factionIndex]?.trim();
-                const timestamp = row[headers.indexOf('Timestamp')]?.trim();
-
+                const timestamp = row[timestampIndex]?.trim();
+    
                 if (!threadName || this.isEntryTooOld(timestamp)) continue;
-
+    
                 const targetChannel = faction === 'Alliance' ? allianceChannel : faction === 'Horde' ? hordeChannel : null;
                 if (!targetChannel) continue;
-
+    
                 const existingThreads = await this.fetchAndFilterThreads(targetChannel, thread => thread.name.trim() === threadName.trim());
-
+    
                 if (existingThreads.length === 0) {
                     const messageOptions = await this.generateMessageContent(headers, row);
-                    await this.createGuildRecruitmentThread(targetChannel, threadName, messageOptions);
-                   console.log(colorize(`[${targetChannel.name}] Added new thread: ${threadName}`, COLORS.GREEN));
-                    newPostsAdded++;
+    
+                    try {
+                        const threadCreationPromise = this.createGuildRecruitmentThread(targetChannel, threadName, messageOptions);
+                        const timeoutPromise = new Promise<ThreadChannel>((_, reject) =>
+                            setTimeout(() => reject(new Error('Thread creation timed out')), 10000)
+                        );
+    
+                        const thread = await Promise.race([threadCreationPromise, timeoutPromise]);
+    
+                        console.log(colorize(`[${targetChannel.name}] Added new thread: ${threadName}`, COLORS.GREEN));
+                        newPostsAdded++;
+                    } catch (error) {
+                        if (error instanceof Error) {
+                            if (error.message.includes('Thread creation timed out')) {
+                                console.error('Thread creation timed out due to rate limit. Stopping further posts.');
+                                hasTimeoutOccurred = true; // Flag timeout occurrence
+                                break; // Exit loop if timeout occurs
+                            } else if (error instanceof RateLimitError) {
+                                const delay = getRateLimitDelay(error);
+                                console.warn(`Rate limit error while posting new entry in ${targetChannel.name}: ${error.message}`);
+                                await new Promise(resolve => setTimeout(resolve, delay));
+                            } else {
+                                console.error(`Failed to create thread due to error: ${error.message}`);
+                                continue; // Continue to the next row if error persists
+                            }
+                        } else {
+                            console.error(`An unknown error occurred: ${String(error)}`);
+                        }
+                    }
                 }
             }
-
+    
             if (newPostsAdded === 0) {
                 console.log('No new posts to add.');
             } else {
@@ -297,5 +432,5 @@ export class ServerManager {
         } catch (error) {
             console.error(`Failed to post new entries: ${error}`);
         }
-    }
+    }    
 }

@@ -88,6 +88,13 @@ const saveServerConfig = (serverId: string, config: object) => {
     }
 };
 
+class RateLimitError extends Error {
+    constructor(public bucket: string, public message: string) {
+        super(message);
+        this.name = 'RateLimitError';
+    }
+}
+
 // Initialize Discord client
 const client = new Client({
     intents: [
@@ -97,11 +104,33 @@ const client = new Client({
     ],
 });
 
+let rateLimitTimeouts = new Map<string, number>(); // Track rate limit timeouts
+
+// Listen to rate limit events
+client.on('rateLimit', (rateLimitData) => {
+    console.warn(`Rate limit hit! Route: ${rateLimitData.route}`);
+    console.warn(`Timeout: ${rateLimitData.timeout}ms`);
+    console.warn(`Method: ${rateLimitData.method}`);
+    console.warn(`Global: ${rateLimitData.global}`);
+    console.warn(`Bucket: ${rateLimitData.bucket}`);
+
+    // Store the timeout duration for the bucket
+    rateLimitTimeouts.set(rateLimitData.bucket, rateLimitData.timeout);
+});
+
+// Log rate limit info before starting polling
+const logRateLimitInfo = () => {
+    console.log(colorize('\nRate limit information is monitored via rateLimit event.', COLORS.YELLOW));
+    // Log or handle other rate limit information as needed
+};
+
 client.once('ready', async () => {
     console.log(`Logged in as ${client.user?.tag}`);
 
     // Function to poll a single server
     const pollServer = async (guild: any) => {
+        console.log(colorize(`\nStarting polling for server ${guild.name} (${guild.id})...\n`, COLORS.CYAN));
+
         const serverConfig = readServerConfig(guild.id);
         const allianceChannel = client.channels.cache.get(serverConfig.ALLIANCE_CHANNEL_ID) as ForumChannel | null;
         const hordeChannel = client.channels.cache.get(serverConfig.HORDE_CHANNEL_ID) as ForumChannel | null;
@@ -117,9 +146,6 @@ client.once('ready', async () => {
         }
 
         try {
-            console.log(colorize(`\nStarting polling for server ${guild.name} (${guild.id})...\n`, COLORS.CYAN));
-
-
             const serverManager = new ServerManager(client, serverConfig.ALLIANCE_CHANNEL_ID, serverConfig.HORDE_CHANNEL_ID, {
                 DISCORD_TOKEN: discordToken,
                 ALLIANCE_CHANNEL_ID: serverConfig.ALLIANCE_CHANNEL_ID,
@@ -129,14 +155,32 @@ client.once('ready', async () => {
                 IMAGE_COLUMN_HEADER: serverConfig.IMAGE_COLUMN_HEADER,
                 EXCLUDED_COLUMN_HEADER: serverConfig.EXCLUDED_COLUMN_HEADER,
                 THREAD_AGE_LIMIT_HOURS: serverConfig.THREAD_AGE_LIMIT_HOURS,
-                POLL_INTERVAL_MS: pollIntervalMs, // Use the value from botsettings.json
+                POLL_INTERVAL_MS: pollIntervalMs,
                 MAX_ENTRY_AGE_DAYS: serverConfig.MAX_ENTRY_AGE_DAYS,
             });
 
-            await serverManager.removeUnmatchedThreads(allianceChannel);
-            await serverManager.removeUnmatchedThreads(hordeChannel);
-            await serverManager.repostOldestThread(allianceChannel, hordeChannel);
-            await serverManager.postNewEntries(allianceChannel, hordeChannel);
+            // Wrap polling tasks in a function that respects rate limits
+            const executePollingTask = async (task: () => Promise<void>) => {
+                try {
+                    await task();
+                } catch (error) {
+                    if (error instanceof RateLimitError) {
+                        console.warn(`Rate limit error: ${error.message}`);
+                        const timeout = rateLimitTimeouts.get(error.bucket) || 10000; // Default to 10 seconds
+                        console.warn(`Waiting for ${timeout}ms before retrying...`);
+                        await new Promise(resolve => setTimeout(resolve, timeout));
+                    } else {
+                        throw error;
+                    }
+                }
+            };
+
+            await executePollingTask(() => serverManager.removeDuplicateThreads(allianceChannel));
+            await executePollingTask(() => serverManager.removeDuplicateThreads(hordeChannel));
+            await executePollingTask(() => serverManager.removeUnmatchedThreads(allianceChannel));
+            await executePollingTask(() => serverManager.removeUnmatchedThreads(hordeChannel));
+            await executePollingTask(() => serverManager.repostOldestThread(allianceChannel, hordeChannel));
+            await executePollingTask(() => serverManager.postNewEntries(allianceChannel, hordeChannel));
 
             console.log(colorize(`\nPolling completed for server ${guild.name} (${guild.id}).`, COLORS.GREEN));
         } catch (error) {
@@ -144,19 +188,22 @@ client.once('ready', async () => {
         }
     };
 
-    // Sequentially poll each guild
-    const pollAllServers = async () => {
-        for (const guild of client.guilds.cache.values()) {
-            await pollServer(guild);
+    // Start the polling loop
+    const startPolling = async () => {
+        while (true) {
+            console.log(colorize('\n\nStarting sequential polling of all servers...', COLORS.BLUE));
+
+            for (const guild of client.guilds.cache.values()) {
+                await pollServer(guild);
+            }
+
+            console.log(colorize('\nAll servers have been polled.', COLORS.GREEN));
+            console.log(`Waiting for ${pollIntervalMs}ms before starting next poll...`);
+            await new Promise(resolve => setTimeout(resolve, pollIntervalMs));
         }
     };
 
-    // Start the sequential polling with interval
-    setInterval(async () => {
-        console.log(colorize('\n\nStarting sequential polling of all servers...', COLORS.BLUE));
-        await pollAllServers();
-        console.log(colorize('\nAll servers have been polled.', COLORS.GREEN));
-    }, pollIntervalMs); // Use the value from botsettings.json
+    startPolling();
 });
 
 
@@ -200,7 +247,6 @@ client.on('interactionCreate', async (interaction: Interaction) => {
             const sheetRange = options.get('sheet_range', true)?.value as string;
             const imageColumnHeader = options.get('image_column_header', true)?.value as string;
             const excludedColumnHeader = options.get('excluded_column_header', true)?.value as string;
-
 
             let serverConfig = readServerConfig(serverId);
 
