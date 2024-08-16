@@ -66,6 +66,7 @@ const readServerConfig = (serverId: string) => {
     return serverSettings[serverId] || {
         ALLIANCE_CHANNEL_ID: '',
         HORDE_CHANNEL_ID: '',
+        MOD_CHANNEL_ID: '',  // Add this line
         SPREADSHEET_ID: '',
         SHEET_RANGE: '',
         IMAGE_COLUMN_HEADER: '',
@@ -74,6 +75,7 @@ const readServerConfig = (serverId: string) => {
         MAX_ENTRY_AGE_DAYS: 14,
     };
 };
+
 
 // Function to save server config
 const saveServerConfig = (serverId: string, config: object) => {
@@ -127,39 +129,44 @@ const logRateLimitInfo = () => {
 client.once('ready', async () => {
     console.log(`Logged in as ${client.user?.tag}`);
 
-    // Function to poll a single server
     const pollServer = async (guild: any) => {
         console.log(colorize(`\nStarting polling for server ${guild.name} (${guild.id})...\n`, COLORS.CYAN));
 
         const serverConfig = readServerConfig(guild.id);
         const allianceChannel = client.channels.cache.get(serverConfig.ALLIANCE_CHANNEL_ID) as ForumChannel | null;
         const hordeChannel = client.channels.cache.get(serverConfig.HORDE_CHANNEL_ID) as ForumChannel | null;
+        const modChannel = client.channels.cache.get(serverConfig.MOD_CHANNEL_ID) as ForumChannel | null;
 
-        if (!allianceChannel || !hordeChannel) {
-            console.error(`One or both channels could not be found for server ${guild.id}.`);
+        if (!allianceChannel || !hordeChannel || !modChannel) {
+            console.error(`One or more channels could not be found for server ${guild.id}.`);
             return;
         }
 
-        if (!(allianceChannel instanceof ForumChannel) || !(hordeChannel instanceof ForumChannel)) {
-            console.error(`One or both channels are not ForumChannel instances for server ${guild.id}.`);
+        if (!(allianceChannel instanceof ForumChannel) || !(hordeChannel instanceof ForumChannel) || !(modChannel instanceof ForumChannel)) {
+            console.error(`One or more channels are not ForumChannel instances for server ${guild.id}.`);
             return;
         }
 
         try {
-            const serverManager = new ServerManager(client, serverConfig.ALLIANCE_CHANNEL_ID, serverConfig.HORDE_CHANNEL_ID, {
-                DISCORD_TOKEN: discordToken,
-                ALLIANCE_CHANNEL_ID: serverConfig.ALLIANCE_CHANNEL_ID,
-                HORDE_CHANNEL_ID: serverConfig.HORDE_CHANNEL_ID,
-                SPREADSHEET_ID: serverConfig.SPREADSHEET_ID,
-                SHEET_RANGE: serverConfig.SHEET_RANGE,
-                IMAGE_COLUMN_HEADER: serverConfig.IMAGE_COLUMN_HEADER,
-                EXCLUDED_COLUMN_HEADER: serverConfig.EXCLUDED_COLUMN_HEADER,
-                THREAD_AGE_LIMIT_HOURS: serverConfig.THREAD_AGE_LIMIT_HOURS,
-                POLL_INTERVAL_MS: pollIntervalMs,
-                MAX_ENTRY_AGE_DAYS: serverConfig.MAX_ENTRY_AGE_DAYS,
-            });
+            const serverManager = new ServerManager(
+                client,
+                serverConfig.ALLIANCE_CHANNEL_ID,
+                serverConfig.HORDE_CHANNEL_ID,
+                serverConfig.MOD_CHANNEL_ID,  // Pass the MOD_CHANNEL_ID here
+                {
+                    DISCORD_TOKEN: discordToken,
+                    ALLIANCE_CHANNEL_ID: serverConfig.ALLIANCE_CHANNEL_ID,
+                    HORDE_CHANNEL_ID: serverConfig.HORDE_CHANNEL_ID,
+                    SPREADSHEET_ID: serverConfig.SPREADSHEET_ID,
+                    SHEET_RANGE: serverConfig.SHEET_RANGE,
+                    IMAGE_COLUMN_HEADER: serverConfig.IMAGE_COLUMN_HEADER,
+                    EXCLUDED_COLUMN_HEADER: serverConfig.EXCLUDED_COLUMN_HEADER,
+                    THREAD_AGE_LIMIT_HOURS: serverConfig.THREAD_AGE_LIMIT_HOURS,
+                    POLL_INTERVAL_MS: pollIntervalMs,
+                    MAX_ENTRY_AGE_DAYS: serverConfig.MAX_ENTRY_AGE_DAYS,
+                }
+            );
 
-            // Wrap polling tasks in a function that respects rate limits
             const executePollingTask = async (task: () => Promise<void>) => {
                 try {
                     await task();
@@ -175,12 +182,17 @@ client.once('ready', async () => {
                 }
             };
 
+            // Existing polling tasks
             await executePollingTask(() => serverManager.removeDuplicateThreads(allianceChannel));
             await executePollingTask(() => serverManager.removeDuplicateThreads(hordeChannel));
             await executePollingTask(() => serverManager.removeUnmatchedThreads(allianceChannel));
             await executePollingTask(() => serverManager.removeUnmatchedThreads(hordeChannel));
             await executePollingTask(() => serverManager.repostOldestThread(allianceChannel, hordeChannel));
             await executePollingTask(() => serverManager.postNewEntries(allianceChannel, hordeChannel));
+            
+            // New task for checking and posting similar threads
+            await executePollingTask(() => serverManager.checkAndPostSimilarThreads(allianceChannel));
+            await executePollingTask(() => serverManager.checkAndPostSimilarThreads(hordeChannel));
 
             console.log(colorize(`\nPolling completed for server ${guild.name} (${guild.id}).`, COLORS.GREEN));
         } catch (error) {
@@ -188,7 +200,6 @@ client.once('ready', async () => {
         }
     };
 
-    // Start the polling loop
     const startPolling = async () => {
         while (true) {
             console.log(colorize('\n\nStarting sequential polling of all servers...', COLORS.BLUE));
@@ -205,7 +216,6 @@ client.once('ready', async () => {
 
     startPolling();
 });
-
 
 client.on('interactionCreate', async (interaction: Interaction) => {
     if (interaction.isCommand()) {
@@ -340,10 +350,38 @@ client.on('interactionCreate', async (interaction: Interaction) => {
 
             serverConfig.HORDE_CHANNEL_ID = channelId;
             saveServerConfig(serverId, serverConfig);
+
+            await selectMenuInteraction.reply({
+                content: `Horde channel updated to <#${channelId}>. Now select the Moderation channel:`,
+                ephemeral: true
+            });
+
+            const channels = guild.channels.cache.filter(c => c instanceof ForumChannel);
+            const modOptions = channels.map(c => new StringSelectMenuOptionBuilder()
+                .setLabel(c.name)
+                .setValue(`mod_${c.id}`)
+            );
+
+            const modSelectMenu = new StringSelectMenuBuilder()
+                .setCustomId('mod_channel_select')
+                .setPlaceholder('Select Moderation Channel')
+                .addOptions(modOptions);
+
+            const row = new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(modSelectMenu);
+
+            await selectMenuInteraction.followUp({
+                content: 'Select the Moderation channel:',
+                components: [row],
+                ephemeral: true
+            });
+
+        } else if (type === 'mod') {
+            serverConfig.MOD_CHANNEL_ID = channelId;
+            saveServerConfig(serverId, serverConfig);
             userSelections.delete(userId);
 
             await selectMenuInteraction.reply({
-                content: `Horde channel updated to <#${channelId}>. Configuration is now complete!`,
+                content: `Moderation channel updated to <#${channelId}>. Configuration is now complete!`,
                 ephemeral: true
             });
 

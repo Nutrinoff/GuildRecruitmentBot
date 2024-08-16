@@ -11,6 +11,7 @@ import { google } from 'googleapis';
 import fs from 'fs';
 import path from 'path';
 import { DateTime } from 'luxon';
+import stringSimilarity from 'string-similarity';
 
 interface Config {
     DISCORD_TOKEN: string;
@@ -44,11 +45,13 @@ const getRateLimitDelay = (error: RateLimitError): number => {
 export class ServerManager {
     private sheets: any;
     private config: Config;
+    private postedWarnings: Set<string> = new Set();
 
     constructor(
         private client: Client,
         private allianceChannelId: string,
         private hordeChannelId: string,
+        private modChannelId: string,  // Accept modChannelId in the constructor
         config: Config
     ) {
         this.config = config;
@@ -70,9 +73,11 @@ export class ServerManager {
         this.sheets = google.sheets({ version: 'v4', auth });
     }
 
-    public updateChannels(allianceChannelId: string, hordeChannelId: string) {
+    public updateChannels(allianceChannelId: string, hordeChannelId: string, modChannelId : string) {
         this.allianceChannelId = allianceChannelId;
         this.hordeChannelId = hordeChannelId;
+        this.modChannelId = modChannelId;  // Initialize it here
+
     }
 
     private async handleRateLimit(response: any) {
@@ -125,6 +130,109 @@ export class ServerManager {
         const entryDate = DateTime.fromFormat(timestamp, 'MM/dd/yyyy HH:mm:ss');
         return DateTime.now().diff(entryDate, 'days').days > this.config.MAX_ENTRY_AGE_DAYS;
     }
+
+    private findSimilarThreads(threads: ThreadChannel[], similarityThreshold: number = 0.6): Map<string, ThreadChannel[]> {
+        const threadTitles = threads.map(thread => thread.name.trim().toLowerCase());
+        const similarThreadsMap = new Map<string, ThreadChannel[]>();
+    
+        for (let i = 0; i < threadTitles.length; i++) {
+            for (let j = i + 1; j < threadTitles.length; j++) {
+                const similarity = stringSimilarity.compareTwoStrings(threadTitles[i], threadTitles[j]);
+    
+                // Log similarity scores for debugging
+                //console.log(`\nComparing "${threadTitles[i]}" with "${threadTitles[j]}": Similarity = ${similarity}`);
+    
+                if (similarity >= similarityThreshold) {
+                    if (!similarThreadsMap.has(threadTitles[i])) {
+                        similarThreadsMap.set(threadTitles[i], []);
+                    }
+                    similarThreadsMap.get(threadTitles[i])!.push(threads[j]);
+                }
+            }
+        }
+        return similarThreadsMap;
+    }
+
+    public async checkAndPostSimilarThreads(channel: ForumChannel) {
+        console.log(`\nChecking for similar threads in ${channel.name}...`);
+    
+        // Fetch active threads from the forum channel
+        const threads = await channel.threads.fetchActive();
+        const threadList = Array.from(threads.threads.values());
+    
+        // Find similar threads
+        const similarThreadsMap = this.findSimilarThreads(threadList, 0.8);
+    
+        // Fetch the mod channel
+        const modChannel = await this.client.channels.fetch(this.modChannelId);
+        if (!modChannel || !(modChannel instanceof ForumChannel)) {
+            console.error(`Failed to fetch the mod channel or it's not a forum channel`);
+            return;
+        }
+    
+        // Fetch existing threads in the mod channel
+        const existingModThreads = await modChannel.threads.fetchActive();
+        const existingModThreadsArray = Array.from(existingModThreads.threads.values());
+    
+        // Process each set of similar threads
+        for (const [originalTitle, similarThreads] of similarThreadsMap) {
+            // Collect all guild names from similar threads
+            const guildNames = new Set<string>();
+            similarThreads.forEach(thread => {
+                const guildName = this.extractGuildNameFromThreadName(thread.name).toLowerCase();
+                guildNames.add(guildName);
+            });
+    
+            // Check if any guild name is present in existing threads
+            const shouldPost = !await Promise.all(existingModThreadsArray.map(async thread => {
+                const threadTitle = thread.name.toLowerCase();
+                const messages = await thread.messages.fetch();
+                const threadMessages = messages.map(msg => msg.content.toLowerCase());
+    
+                // Check if any guild name is present in the thread title or content
+                return Array.from(guildNames).some(guildName =>
+                    threadTitle.includes(guildName) || threadMessages.some(content => content.includes(guildName))
+                );
+            })).then(results => results.some(hasGuildName => hasGuildName));
+    
+            if (shouldPost) {
+                // Construct the message content with the similar thread names
+                let messageContent = `⚠️ **Potentially Similar Guild Names Found for: ${originalTitle}**\n\n`;
+                similarThreads.forEach(thread => {
+                    messageContent += ` - ${thread.name} (ID: ${thread.id})\n`;
+                });
+    
+                // Create a new thread title with the original title and a timestamp
+                const threadTitle = `Similar Guild Names - ${originalTitle} - ${DateTime.now().toFormat('yyyy-MM-dd HH:mm')}`;
+    
+                try {
+                    // Create a new thread in the mod channel
+                    const createdThread = await modChannel.threads.create({
+                        name: threadTitle,
+                        autoArchiveDuration: 60, // Set the auto-archive duration as needed
+                        reason: 'Similar guild names detected',
+                        message: { content: messageContent },
+                    });
+    
+                    console.log(`\nPosted similar thread names to mod channel in thread: ${createdThread.name}.`);
+                } catch (error) {
+                    console.error(`\nFailed to create thread in mod channel: ${error}`);
+                }
+            } else {
+                console.log(`\nA thread with similar content already exists in the mod channel.`);
+            }
+        }
+    }
+    
+    private extractGuildNameFromThreadName(name: string): string {
+        // Simplified extraction logic: Return the part of the name that is considered the guild name
+        return name.split(' - ')[0].trim(); // Adjust based on actual thread naming conventions
+    }
+    
+    
+    
+    
+    
 
     public async removeUnmatchedThreads(channel: ForumChannel) {
         try {
