@@ -28,6 +28,29 @@ interface Config {
 
 const colorize = (text: string, colorCode: string): string => `\x1b[${colorCode}m${text}\x1b[0m`;
 
+const classEmotes: { [key: string]: string } = {
+    '[Warrior]': '<:warrior_icon:1275165078483767328>',
+    '[Mage]': '<:mage_icon:1275165065825226963>',
+    '[Warlock]': '<:warlock_icon:1275165336009834619>',
+    '[Hunter]': '<:hunter_icon:1275165064357351497>',
+    '[Rogue]': '<:rogue_icon:1275165072632709131>',
+    '[Druid]': '<:druid_icon:1275165058753630259>',
+    '[Priest]': '<:priest_icon:1275165070820638750>',
+    '[Paladin]': '<:paladin_icon:1275165069138989137>',
+    '[Shaman]': '<:shaman_icon:1275165074100850721>',
+    '[Monk]': '<:monk_icon:1275165067175923873>',
+    '[Evoker]': '<:evoker_icon:1275165061782175774>',
+    '[Demon Hunter]': '<:demonhunter_icon:1275165057172373568>',
+    '[Death Knight]': '<:deathknight_icon:1275165056073465957>'
+};
+
+const roleEmotes: { [key: string]: string } = {
+    'Tank': '<:tank_icon:1275165468164096192>',
+    'Healer': '<:heal_icon:1275165466872250388>',
+    'DPSMelee': '<:meleedps_icon:1275165464086970409>',
+    'DPSRanged': '<:rangeddps_icon:1275165465374752860>'
+};
+
 const COLORS = {
     RED: '31',
     GREEN: '32',
@@ -228,11 +251,6 @@ export class ServerManager {
         // Simplified extraction logic: Return the part of the name that is considered the guild name
         return name.split(' - ')[0].trim(); // Adjust based on actual thread naming conventions
     }
-    
-    
-    
-    
-    
 
     public async removeUnmatchedThreads(channel: ForumChannel) {
         try {
@@ -307,31 +325,53 @@ export class ServerManager {
         }
     }
     
-    
-
     private async generateMessageContent(headers: string[], row: string[]): Promise<MessageCreateOptions> {
         let messageContent = '';
         const files: { attachment: Buffer; name: string }[] = [];
-
         const imageColumnIndex = this.getImageColumnIndex(headers);
-
+    
         for (let j = 1; j < row.length; j++) {
-            const key = headers[j];
-            const value = row[j];
-            if (key.includes(this.config.EXCLUDED_COLUMN_HEADER)) continue; // Exclude any header containing the specified text
-            if (value) messageContent += `**${key}**: ${value}\n`;
-        }
-
-        if (imageColumnIndex !== -1 && row[imageColumnIndex]?.startsWith('http')) {
-            const imageData = await this.fetchImage(row[imageColumnIndex]);
-            if (imageData) {
-                files.push({ attachment: imageData, name: `image${files.length + 1}.png` });
+            const key = headers[j].trim();
+            const value = row[j]?.trim();
+    
+            // Skip columns containing "Guild Logo" in the header
+            if (key.toLowerCase().includes('guild logo')) continue;
+            if (key.includes(this.config.EXCLUDED_COLUMN_HEADER)) continue;
+    
+            if (value) {
+                if (key.startsWith('[') && key.endsWith(']')) {
+                    // Translate class headers to emotes
+                    const classEmote = classEmotes[key] || key;
+                    messageContent += `${classEmote} `;
+    
+                    // Translate roles to emotes and join them with a single space
+                    const roles = value.split(',').map(role => role.trim());
+                    const roleEmotesString = roles.map(role => roleEmotes[role] || role).join(' ');
+                    messageContent += roleEmotesString + '\n';
+                } else {
+                    // Format other headers including "Loot System"
+                    messageContent += `**${key}:** ${value}\n`;
+                }
             }
         }
-
-        return { content: messageContent, files };
-    }
-
+    
+        // Handle image attachment
+        if (imageColumnIndex !== -1 && row[imageColumnIndex]?.match(/\.(png|jpg|jpeg)$/)) {
+            const imageUrl = row[imageColumnIndex];
+            try {
+                const imageData = await this.fetchImage(imageUrl);
+                if (imageData) {
+                    files.push({ attachment: imageData, name: path.basename(imageUrl) });
+                }
+            } catch (error) {
+                console.error(`Failed to fetch image from ${imageUrl}:`, error);
+            }
+        }
+    
+        // Return the formatted message and files
+        return { content: messageContent.trim(), files };
+    }    
+   
     private async handleThreadReposting(channel: ForumChannel, thread: ThreadChannel, row: string[], headers: string[]) {
         try {
             await thread.delete('Reposting new thread');
