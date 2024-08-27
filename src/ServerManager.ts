@@ -24,6 +24,7 @@ interface Config {
     THREAD_AGE_LIMIT_HOURS: number;
     POLL_INTERVAL_MS: number;
     MAX_ENTRY_AGE_DAYS: number;
+    MAX_NEW_THREADS_PER_CYCLE: number;
 }
 
 const colorize = (text: string, colorCode: string): string => `\x1b[${colorCode}m${text}\x1b[0m`;
@@ -127,14 +128,25 @@ export class ServerManager {
 
     private async fetchImage(url: string): Promise<Buffer | null> {
         try {
+            // Make a HEAD request to get the content type
+            const headResponse = await axios.head(url);
+            
+            // Check if the content type is an image
+            const contentType = headResponse.headers['content-type'];
+            if (!contentType || !contentType.startsWith('image/')) {
+                console.error(`URL ${url} does not point to an image. Content-Type: ${contentType}`);
+                return null;
+            }
+            
+            // Determine the correct extension if necessary
+            // Assuming content-type has valid information
             const response = await axios.get(url, { responseType: 'arraybuffer' });
-            await this.handleRateLimit(response);
             return Buffer.from(response.data);
         } catch (error) {
             console.error(`Failed to fetch image from ${url}: ${error}`);
             return null;
         }
-    }
+    }  
 
     private getImageColumnIndex(headers: string[]): number {
         return headers.findIndex(header => header.includes(this.config.IMAGE_COLUMN_HEADER));
@@ -524,50 +536,84 @@ export class ServerManager {
                 return;
             }
     
+            // Fetch existing thread names from both channels
+            const existingThreads = await Promise.all([
+                this.fetchAndFilterThreads(allianceChannel, () => true),
+                this.fetchAndFilterThreads(hordeChannel, () => true),
+            ]);
+    
+            const existingThreadNames = new Set([
+                ...existingThreads[0].map(thread => thread.name.trim().toLowerCase()),
+                ...existingThreads[1].map(thread => thread.name.trim().toLowerCase())
+            ]);
+    
+            // Fetch the maximum number of new threads allowed per cycle from the config
+            const maxNewThreads = this.config.MAX_NEW_THREADS_PER_CYCLE || 10;
+    
+            // First pass: Identify new guild names
+            const newGuildNames = new Set<string>();
+    
             for (const row of rows.slice(1)) {
-                if (hasTimeoutOccurred) break; // Exit loop if timeout has occurred
+                const threadName = row[guildNameIndex]?.trim();
+    
+                if (threadName && !existingThreadNames.has(threadName.trim().toLowerCase())) {
+                    newGuildNames.add(threadName.trim());
+                }
+            }
+    
+            // If no new guild names found, exit early
+            if (newGuildNames.size === 0) {
+                console.log('No new guild names found.');
+                return;
+            }
+    
+            // Second pass: Process rows for new guild names
+            for (const row of rows.slice(1)) {
+                if (hasTimeoutOccurred || newPostsAdded >= maxNewThreads) break; // Exit loop if timeout or max posts reached
     
                 const threadName = row[guildNameIndex]?.trim();
                 const faction = row[factionIndex]?.trim();
                 const timestamp = row[timestampIndex]?.trim();
     
-                if (!threadName || this.isEntryTooOld(timestamp)) continue;
+                if (!threadName || !newGuildNames.has(threadName) || this.isEntryTooOld(timestamp)) continue;
     
                 const targetChannel = faction === 'Alliance' ? allianceChannel : faction === 'Horde' ? hordeChannel : null;
                 if (!targetChannel) continue;
     
-                const existingThreads = await this.fetchAndFilterThreads(targetChannel, thread => thread.name.trim() === threadName.trim());
+                const messageOptions = await this.generateMessageContent(headers, row);
     
-                if (existingThreads.length === 0) {
-                    const messageOptions = await this.generateMessageContent(headers, row);
+                try {
+                    const threadCreationPromise = this.createGuildRecruitmentThread(targetChannel, threadName, messageOptions);
+                    const timeoutPromise = new Promise<ThreadChannel>((_, reject) =>
+                        setTimeout(() => reject(new Error('Thread creation timed out')), 10000)
+                    );
     
-                    try {
-                        const threadCreationPromise = this.createGuildRecruitmentThread(targetChannel, threadName, messageOptions);
-                        const timeoutPromise = new Promise<ThreadChannel>((_, reject) =>
-                            setTimeout(() => reject(new Error('Thread creation timed out')), 10000)
-                        );
+                    const thread = await Promise.race([threadCreationPromise, timeoutPromise]);
     
-                        const thread = await Promise.race([threadCreationPromise, timeoutPromise]);
+                    console.log(colorize(`[${targetChannel.name}] Added new thread: ${threadName}`, COLORS.GREEN));
+                    newPostsAdded++;
     
-                        console.log(colorize(`[${targetChannel.name}] Added new thread: ${threadName}`, COLORS.GREEN));
-                        newPostsAdded++;
-                    } catch (error) {
-                        if (error instanceof Error) {
-                            if (error.message.includes('Thread creation timed out')) {
-                                console.error('Thread creation timed out due to rate limit. Stopping further posts.');
-                                hasTimeoutOccurred = true; // Flag timeout occurrence
-                                break; // Exit loop if timeout occurs
-                            } else if (error instanceof RateLimitError) {
-                                const delay = getRateLimitDelay(error);
-                                console.warn(`Rate limit error while posting new entry in ${targetChannel.name}: ${error.message}`);
-                                await new Promise(resolve => setTimeout(resolve, delay));
-                            } else {
-                                console.error(`Failed to create thread due to error: ${error.message}`);
-                                continue; // Continue to the next row if error persists
-                            }
+                    // Stop creating new threads if we hit the limit for this cycle
+                    if (newPostsAdded >= maxNewThreads) {
+                        console.log(colorize(`Reached the limit of ${maxNewThreads} new threads for this cycle.`, COLORS.YELLOW));
+                        break;
+                    }
+                } catch (error) {
+                    if (error instanceof Error) {
+                        if (error.message.includes('Thread creation timed out')) {
+                            console.error('Thread creation timed out due to rate limit. Stopping further posts.');
+                            hasTimeoutOccurred = true; // Flag timeout occurrence
+                            break; // Exit loop if timeout occurs
+                        } else if (error instanceof RateLimitError) {
+                            const delay = getRateLimitDelay(error);
+                            console.warn(`Rate limit error while posting new entry in ${targetChannel.name}: ${error.message}`);
+                            await new Promise(resolve => setTimeout(resolve, delay));
                         } else {
-                            console.error(`An unknown error occurred: ${String(error)}`);
+                            console.error(`Failed to create thread due to error: ${error.message}`);
+                            continue; // Continue to the next row if error persists
                         }
+                    } else {
+                        console.error(`An unknown error occurred: ${String(error)}`);
                     }
                 }
             }
@@ -580,5 +626,5 @@ export class ServerManager {
         } catch (error) {
             console.error(`Failed to post new entries: ${error}`);
         }
-    }    
+    }     
 }

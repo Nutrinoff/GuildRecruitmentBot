@@ -66,11 +66,8 @@ const readServerConfig = (serverId: string) => {
     return serverSettings[serverId] || {
         ALLIANCE_CHANNEL_ID: '',
         HORDE_CHANNEL_ID: '',
-        MOD_CHANNEL_ID: '',  // Add this line
+        MOD_CHANNEL_ID: '',
         SPREADSHEET_ID: '',
-        SHEET_RANGE: '',
-        IMAGE_COLUMN_HEADER: '',
-        EXCLUDED_COLUMN_HEADER: '',
         THREAD_AGE_LIMIT_HOURS: 0.5,
         MAX_ENTRY_AGE_DAYS: 14,
     };
@@ -131,7 +128,11 @@ client.once('ready', async () => {
 
     const pollServer = async (guild: any) => {
         console.log(colorize(`\nStarting polling for server ${guild.name} (${guild.id})...\n`, COLORS.CYAN));
+        
+        // Reload bot settings before each polling cycle
+        const botSettings = JSON.parse(fs.readFileSync(botSettingsPath, 'utf-8'));
 
+        const pollIntervalMs = botSettings.POLL_INTERVAL_MS;
         const serverConfig = readServerConfig(guild.id);
         const allianceChannel = client.channels.cache.get(serverConfig.ALLIANCE_CHANNEL_ID) as ForumChannel | null;
         const hordeChannel = client.channels.cache.get(serverConfig.HORDE_CHANNEL_ID) as ForumChannel | null;
@@ -158,12 +159,13 @@ client.once('ready', async () => {
                     ALLIANCE_CHANNEL_ID: serverConfig.ALLIANCE_CHANNEL_ID,
                     HORDE_CHANNEL_ID: serverConfig.HORDE_CHANNEL_ID,
                     SPREADSHEET_ID: serverConfig.SPREADSHEET_ID,
-                    SHEET_RANGE: serverConfig.SHEET_RANGE,
-                    IMAGE_COLUMN_HEADER: serverConfig.IMAGE_COLUMN_HEADER,
-                    EXCLUDED_COLUMN_HEADER: serverConfig.EXCLUDED_COLUMN_HEADER,
+                    SHEET_RANGE: botSettings.SHEET_RANGE,
+                    IMAGE_COLUMN_HEADER: botSettings.IMAGE_COLUMN_HEADER,
+                    EXCLUDED_COLUMN_HEADER: botSettings.EXCLUDED_COLUMN_HEADER,
                     THREAD_AGE_LIMIT_HOURS: serverConfig.THREAD_AGE_LIMIT_HOURS,
                     POLL_INTERVAL_MS: pollIntervalMs,
                     MAX_ENTRY_AGE_DAYS: serverConfig.MAX_ENTRY_AGE_DAYS,
+                    MAX_NEW_THREADS_PER_CYCLE: botSettings.MAX_NEW_THREADS_PER_CYCLE,
                 }
             );
 
@@ -249,26 +251,17 @@ client.on('interactionCreate', async (interaction: Interaction) => {
                 ephemeral: true
             });
 
-        } else if (commandInteraction.commandName === 'setupvalues') {
-            // Handling setupvalues command
-            const options = commandInteraction.options as CommandInteraction['options'];
-
-            const spreadsheetId = options.get('spreadsheet_id', true)?.value as string;
-            const sheetRange = options.get('sheet_range', true)?.value as string;
-            const imageColumnHeader = options.get('image_column_header', true)?.value as string;
-            const excludedColumnHeader = options.get('excluded_column_header', true)?.value as string;
+        } else if (commandInteraction.commandName === 'setupsheet') {
+            const spreadsheetId = commandInteraction.options.get('spreadsheet_id', true)?.value as string;
 
             let serverConfig = readServerConfig(serverId);
 
             serverConfig.SPREADSHEET_ID = spreadsheetId;
-            serverConfig.SHEET_RANGE = sheetRange;
-            serverConfig.IMAGE_COLUMN_HEADER = imageColumnHeader;
-            serverConfig.EXCLUDED_COLUMN_HEADER = excludedColumnHeader;
 
             saveServerConfig(serverId, serverConfig);
 
             await commandInteraction.reply({
-                content: `Configuration updated:\n- Spreadsheet ID: ${spreadsheetId}\n- Sheet Range: ${sheetRange}\n- Image Column Header: ${imageColumnHeader}\n- Excluded Column Header: ${excludedColumnHeader}`,
+                content: `Spreadsheet ID updated: ${spreadsheetId}`,
                 ephemeral: true
             });
 
