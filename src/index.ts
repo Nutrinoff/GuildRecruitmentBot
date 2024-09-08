@@ -25,6 +25,7 @@ if (!discordToken) {
 // Define paths for configuration files
 const configPath = path.resolve(__dirname, 'server-settings.json');
 const botSettingsPath = path.resolve(__dirname, 'botsettings.json');
+const joinTimesPath = path.resolve(__dirname, 'join-times.json');
 
 // Load bot settings
 const botSettings = JSON.parse(fs.readFileSync(botSettingsPath, 'utf-8'));
@@ -73,7 +74,6 @@ const readServerConfig = (serverId: string) => {
     };
 };
 
-
 // Function to save server config
 const saveServerConfig = (serverId: string, config: object) => {
     let serverSettings = fs.existsSync(configPath) ? JSON.parse(fs.readFileSync(configPath, 'utf-8')) : {};
@@ -87,12 +87,51 @@ const saveServerConfig = (serverId: string, config: object) => {
     }
 };
 
-class RateLimitError extends Error {
-    constructor(public bucket: string, public message: string) {
-        super(message);
-        this.name = 'RateLimitError';
+// Track server join times
+const trackServerJoinTime = (guildId: string) => {
+    const joinTimes = JSON.parse(fs.readFileSync(joinTimesPath, 'utf-8') || '{}');
+    joinTimes[guildId] = new Date().toISOString();
+    fs.writeFileSync(joinTimesPath, JSON.stringify(joinTimes, null, 2));
+};
+
+// Check and remove server if it hasn't been set up
+const checkAndRemoveUnconfiguredServers = async (guild: any) => {
+    const joinTimes = JSON.parse(fs.readFileSync(joinTimesPath, 'utf-8') || '{}');
+    const joinTime = new Date(joinTimes[guild.id]);
+    const currentTime = new Date();
+    const setupTimeLimitMs = 24 * 60 * 60 * 1000; // 24 hours in milliseconds
+
+    if (!joinTime) {
+        console.error(`No join time found for server ${guild.name} (${guild.id}).`);
+        return;
     }
-}
+
+    const timeSinceJoinMs = currentTime.getTime() - joinTime.getTime();
+    
+    if (timeSinceJoinMs > setupTimeLimitMs) {
+        console.log(`\nServer ${guild.name} (${guild.id}) has been unconfigured for too long.`);
+        console.log(`Current Time: ${currentTime.toISOString()}`);
+        console.log(`Join Time: ${joinTime.toISOString()}`);
+        console.log(`Time Since Join: ${Math.floor(timeSinceJoinMs / (1000 * 60 * 60))} hours`);
+
+        const serverConfig = readServerConfig(guild.id);
+        const allianceChannel = client.channels.cache.get(serverConfig.ALLIANCE_CHANNEL_ID) as ForumChannel | null;
+        const hordeChannel = client.channels.cache.get(serverConfig.HORDE_CHANNEL_ID) as ForumChannel | null;
+        const modChannel = client.channels.cache.get(serverConfig.MOD_CHANNEL_ID) as ForumChannel | null;
+
+        if (!allianceChannel || !hordeChannel || !modChannel) {
+            console.log(`Removing bot from server ${guild.name} (${guild.id}) due to incomplete setup.`);
+            await guild.leave();
+            delete joinTimes[guild.id];
+            fs.writeFileSync(joinTimesPath, JSON.stringify(joinTimes, null, 2));
+            console.log(`Successfully removed server ${guild.name} (${guild.id}).`);
+        } else {
+            console.log(`Server ${guild.name} (${guild.id}) is still configured. No action taken.`);
+        }
+    } else {
+        console.log(`Server ${guild.name} (${guild.id}) is within the safe time limit.`);
+    }
+};
 
 // Initialize Discord client
 const client = new Client({
@@ -103,28 +142,14 @@ const client = new Client({
     ],
 });
 
-let rateLimitTimeouts = new Map<string, number>(); // Track rate limit timeouts
-
 // Listen to rate limit events
-client.on('rateLimit', (rateLimitData) => {
-    console.warn(`Rate limit hit! Route: ${rateLimitData.route}`);
-    console.warn(`Timeout: ${rateLimitData.timeout}ms`);
-    console.warn(`Method: ${rateLimitData.method}`);
-    console.warn(`Global: ${rateLimitData.global}`);
-    console.warn(`Bucket: ${rateLimitData.bucket}`);
-
-    // Store the timeout duration for the bucket
-    rateLimitTimeouts.set(rateLimitData.bucket, rateLimitData.timeout);
-});
-
-// Log rate limit info before starting polling
-const logRateLimitInfo = () => {
-    console.log(colorize('\nRate limit information is monitored via rateLimit event.', COLORS.YELLOW));
-    // Log or handle other rate limit information as needed
-};
-
 client.once('ready', async () => {
     console.log(`Logged in as ${client.user?.tag}`);
+
+    // Track server join time when bot joins a server
+    client.on('guildCreate', async (guild) => {
+        trackServerJoinTime(guild.id);
+    });
 
     const pollServer = async (guild: any) => {
         console.log(colorize(`\nStarting polling for server ${guild.name} (${guild.id})...\n`, COLORS.CYAN));
@@ -169,32 +194,17 @@ client.once('ready', async () => {
                 }
             );
 
-            const executePollingTask = async (task: () => Promise<void>) => {
-                try {
-                    await task();
-                } catch (error) {
-                    if (error instanceof RateLimitError) {
-                        console.warn(`Rate limit error: ${error.message}`);
-                        const timeout = rateLimitTimeouts.get(error.bucket) || 10000; // Default to 10 seconds
-                        console.warn(`Waiting for ${timeout}ms before retrying...`);
-                        await new Promise(resolve => setTimeout(resolve, timeout));
-                    } else {
-                        throw error;
-                    }
-                }
-            };
-
             // Existing polling tasks
-            await executePollingTask(() => serverManager.removeDuplicateThreads(allianceChannel));
-            await executePollingTask(() => serverManager.removeDuplicateThreads(hordeChannel));
-            await executePollingTask(() => serverManager.removeUnmatchedThreads(allianceChannel));
-            await executePollingTask(() => serverManager.removeUnmatchedThreads(hordeChannel));
-            await executePollingTask(() => serverManager.repostOldestThread(allianceChannel, hordeChannel));
-            await executePollingTask(() => serverManager.postNewEntries(allianceChannel, hordeChannel));
+            await serverManager.removeDuplicateThreads(allianceChannel);
+            await serverManager.removeDuplicateThreads(hordeChannel);
+            await serverManager.removeUnmatchedThreads(allianceChannel);
+            await serverManager.removeUnmatchedThreads(hordeChannel);
+            await serverManager.repostOldestThread(allianceChannel, hordeChannel);
+            await serverManager.postNewEntries(allianceChannel, hordeChannel);
             
             // New task for checking and posting similar threads
-            await executePollingTask(() => serverManager.checkAndPostSimilarThreads(allianceChannel));
-            await executePollingTask(() => serverManager.checkAndPostSimilarThreads(hordeChannel));
+            await serverManager.checkAndPostSimilarThreads(allianceChannel);
+            await serverManager.checkAndPostSimilarThreads(hordeChannel);
 
             console.log(colorize(`\nPolling completed for server ${guild.name} (${guild.id}).`, COLORS.GREEN));
         } catch (error) {
@@ -208,6 +218,7 @@ client.once('ready', async () => {
 
             for (const guild of client.guilds.cache.values()) {
                 await pollServer(guild);
+                await checkAndRemoveUnconfiguredServers(guild); // Check and remove unconfigured servers
             }
 
             console.log(colorize('\nAll servers have been polled.', COLORS.GREEN));

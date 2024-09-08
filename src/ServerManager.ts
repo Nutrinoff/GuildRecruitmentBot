@@ -4,7 +4,8 @@ import {
     ThreadChannel,
     MessageCreateOptions,
     GatewayIntentBits,
-    RateLimitError
+    RateLimitError,
+    EmbedBuilder
 } from 'discord.js';
 import axios from 'axios';
 import { google } from 'googleapis';
@@ -30,26 +31,26 @@ interface Config {
 const colorize = (text: string, colorCode: string): string => `\x1b[${colorCode}m${text}\x1b[0m`;
 
 const classEmotes: { [key: string]: string } = {
-    '[Warrior]': '<:warrior_icon:1275165078483767328>',
-    '[Mage]': '<:mage_icon:1275165065825226963>',
-    '[Warlock]': '<:warlock_icon:1275165336009834619>',
-    '[Hunter]': '<:hunter_icon:1275165064357351497>',
-    '[Rogue]': '<:rogue_icon:1275165072632709131>',
-    '[Druid]': '<:druid_icon:1275165058753630259>',
-    '[Priest]': '<:priest_icon:1275165070820638750>',
-    '[Paladin]': '<:paladin_icon:1275165069138989137>',
-    '[Shaman]': '<:shaman_icon:1275165074100850721>',
-    '[Monk]': '<:monk_icon:1275165067175923873>',
-    '[Evoker]': '<:evoker_icon:1275165061782175774>',
-    '[Demon Hunter]': '<:demonhunter_icon:1275165057172373568>',
-    '[Death Knight]': '<:deathknight_icon:1275165056073465957>'
+    '[Warrior]': '<:wa_i:1281118860514164759>',
+    '[Mage]': '<:ma_i:1281118847151247424>',
+    '[Warlock]': '<:wl_i:1281118899232051241>',
+    '[Hunter]': '<:hu_i:1281118845460807690>',
+    '[Rogue]': '<:ro_i:1281118853887295498>',
+    '[Druid]': '<:dr_i:1281118706424090654>',
+    '[Priest]': '<:pr_i:1281118852440133666>',
+    '[Paladin]': '<:pa_i:1281118849793659043>',
+    '[Shaman]': '<:sh_i:1281118855401574410>',
+    '[Monk]': '<:mo_i:1281118848598413414>',
+    '[Evoker]': '<:ev_i:1281118844001452086>',
+    '[Demon Hunter]': '<:dh_i:1281118841027563550>',
+    '[Death Knight]': '<:dk_i:1281118842512478319>'
 };
 
 const roleEmotes: { [key: string]: string } = {
-    'Tank': '<:tank_icon:1275165468164096192>',
-    'Healer': '<:heal_icon:1275165466872250388>',
-    'DPSMelee': '<:meleedps_icon:1275165464086970409>',
-    'DPSRanged': '<:rangeddps_icon:1275165465374752860>'
+    'Tank': '<:t_i:1275165468164096192>',
+    'Healer': '<:h_i:1275165466872250388>',
+    'DPSMelee': '<:md_i:1275165464086970409>',
+    'DPSRanged': '<:rd_i:1275165465374752860>'
 };
 
 const COLORS = {
@@ -268,7 +269,7 @@ export class ServerManager {
         try {
             console.log(colorize(`\n\nStarting to check ${channel.name} for threads without Google Sheet...`, COLORS.YELLOW));
             const threads = await channel.threads.fetchActive();
-            const existingThreadNames = new Set(Array.from(threads.threads.values()).map(thread => thread.name.trim().toLowerCase()));
+            const existingThreadNames = Array.from(threads.threads.values()).map(thread => thread.name.trim().toLowerCase());
     
             const rows = await this.getSpreadsheetData();
             const headers = rows[0];
@@ -289,11 +290,14 @@ export class ServerManager {
                 }
             }
     
+            // Adjust logic: Check if any guild name is contained within the thread title
             const threadsToDelete = Array.from(threads.threads.values()).filter(thread => {
                 const threadName = thread.name.trim().toLowerCase();
-                const threadTimestamp = sheetEntries.get(threadName);
-                const isOld = threadTimestamp ? this.isEntryTooOld(threadTimestamp) : true;
-                return !sheetEntries.has(threadName) || isOld;
+                const matchingGuildEntry = Array.from(sheetEntries.keys()).find(guildName => threadName.includes(guildName));
+                
+                // If no matching entry or the entry is too old, mark for deletion
+                const isOld = matchingGuildEntry ? this.isEntryTooOld(sheetEntries.get(matchingGuildEntry) || '') : true;
+                return !matchingGuildEntry || isOld;
             });
     
             if (threadsToDelete.length > 0) {
@@ -312,14 +316,17 @@ export class ServerManager {
         } catch (error) {
             console.error(`Failed to remove unmatched threads: ${error}`);
         }
-    }
+    }    
 
-    private async createGuildRecruitmentThread(channel: ForumChannel, threadTitle: string, messageOptions: MessageCreateOptions) {
+    private async createGuildRecruitmentThread(channel: ForumChannel, guildName: string, guildScope: string, messageOptions: MessageCreateOptions) {
         const timeoutDuration = 15000; // Timeout duration in milliseconds (15 seconds)
     
         try {
+            // Sanitize the title with both guild name and guild scope
+            const sanitizedTitle = this.sanitizeTitle(guildName, guildScope);
+    
             const threadCreationPromise = channel.threads.create({
-                name: threadTitle || 'No Title',
+                name: sanitizedTitle || 'No Title',
                 autoArchiveDuration: 60,
                 reason: 'Creating thread for recruitment post',
                 message: messageOptions,
@@ -335,39 +342,98 @@ export class ServerManager {
             // Gracefully exit without logging error
             return;
         }
-    }
+    }    
+    
+    private sanitizeTitle(guildName: string, guildScope: string): string {
+        // Define a regex that allows alphanumeric characters, spaces, hyphens, and accented characters
+        const allowedCharactersRegex = /[^\p{L}\p{N}\s\-]/gu;
+    
+        const cleanedGuildName = guildName
+            .replace(allowedCharactersRegex, '') // Allow alphanumeric, spaces, hyphens, and accented characters
+            .trim();
+        
+        const cleanedGuildScope = guildScope
+            .replace(allowedCharactersRegex, '') // Allow alphanumeric, spaces, hyphens, and accented characters
+            .trim();
+        
+        // Combine the cleaned name and scope into the desired format
+        return `<${cleanedGuildName}> - ${cleanedGuildScope}`;
+    }  
     
     private async generateMessageContent(headers: string[], row: string[]): Promise<MessageCreateOptions> {
-        let messageContent = '';
         const files: { attachment: Buffer; name: string }[] = [];
         const imageColumnIndex = this.getImageColumnIndex(headers);
     
+        // Create the EmbedBuilder instance
+        const embed = new EmbedBuilder()
+            .setColor('#0099ff')
+            .setTitle('Guild Details')
+            .setTimestamp();
+    
+        let emoteRows: string[] = [];
+        let otherFields: { name: string, value: string, inline: boolean }[] = [];
+        let discordLink: string | null = null;
+        let discordContact: string | null = null;
+    
         for (let j = 1; j < row.length; j++) {
             const key = headers[j].trim();
-            const value = row[j]?.trim();
+            let value = row[j]?.trim();
     
-            // Skip columns containing "Guild Logo" in the header
-            if (key.toLowerCase().includes('guild logo')) continue;
-            if (key.includes(this.config.EXCLUDED_COLUMN_HEADER)) continue;
+            // Skip excluded columns
+            if (key.toLowerCase().includes('guild logo') || key.includes(this.config.EXCLUDED_COLUMN_HEADER)) {
+                continue;
+            }
     
-            if (value) {
-                if (key.startsWith('[') && key.endsWith(']')) {
-                    // Translate class headers to emotes
-                    const classEmote = classEmotes[key] || key;
-                    messageContent += `${classEmote} `;
+            if (value && key.startsWith('[') && key.endsWith(']')) {
+                // Process emote rows
+                const classEmote = classEmotes[key] || key;
+                const roles = value.split(',').map(role => role.trim());
+                const roleEmotesString = roles.map(role => roleEmotes[role] || role).join(' ');
+                const classRoleLine = `${classEmote} ${roleEmotesString}`;
     
-                    // Translate roles to emotes and join them with a single space
-                    const roles = value.split(',').map(role => role.trim());
-                    const roleEmotesString = roles.map(role => roleEmotes[role] || role).join(' ');
-                    messageContent += roleEmotesString + '\n';
-                } else {
-                    // Format other headers including "Loot System"
-                    messageContent += `**${key}:** ${value}\n`;
+                emoteRows.push(classRoleLine);
+            } else {
+                // Process other fields
+                if (value.length > 1024) {
+                    value = value.slice(0, 1024) + '...'; // Truncate long values
+                }
+                if (key.length <= 256 && value.length <= 1024) {
+                    if (key.toLowerCase().includes('discord link')) {
+                        discordLink = value;
+                    } else if (key.toLowerCase().includes('discord contact')) {
+                        discordContact = value;
+                    } else {
+                        otherFields.push({ name: key, value: value, inline: false });
+                    }
                 }
             }
         }
     
-        // Handle image attachment
+        // Add non-emote fields to the embed first if they have valid content
+        otherFields.forEach(field => {
+            if (field.name && field.value) {
+                embed.addFields(field);
+            }
+        });
+    
+        // Add each row of emotes as a separate field
+        emoteRows.forEach(row => {
+            if (row.length > 0 && row.length <= 1024) {
+                embed.addFields({ name: '\u200B', value: row, inline: false });
+            } else {
+                console.warn('Emote content exceeded the 1024 character limit or is empty and was not added to the embed.');
+            }
+        });
+    
+        // Add Discord Link and Discord Contact fields last, if they exist
+        if (discordLink) {
+            embed.addFields({ name: 'Discord Link', value: discordLink, inline: false });
+        }
+        if (discordContact) {
+            embed.addFields({ name: 'Discord Contact', value: discordContact, inline: false });
+        }
+    
+        // Handle image attachment if an image is available
         if (imageColumnIndex !== -1 && row[imageColumnIndex]?.match(/\.(png|jpg|jpeg)$/)) {
             const imageUrl = row[imageColumnIndex];
             try {
@@ -380,18 +446,36 @@ export class ServerManager {
             }
         }
     
-        // Return the formatted message and files
-        return { content: messageContent.trim(), files };
-    }    
-   
+        return {
+            content: '',
+            embeds: [embed],
+            files,
+        };
+    }
+    
     private async handleThreadReposting(channel: ForumChannel, thread: ThreadChannel, row: string[], headers: string[]) {
         try {
+            // Delete the old thread
             await thread.delete('Reposting new thread');
             console.log(`[${channel.name}] Deleted old thread for reposting: ${thread.name}`);
-    
+        
+            // Generate new message content
             const messageOptions = await this.generateMessageContent(headers, row);
-            await this.createGuildRecruitmentThread(channel, thread.name, messageOptions);
-            console.log(colorize(`[${channel.name}] Reposted thread: ${thread.name}`, COLORS.GREEN));
+    
+            // Get the index of the 'Guild Scope' column (formerly 'Guild Type')
+            const guildScopeIndex = headers.indexOf('Guild Type'); // Update to 'Guild Type' if needed
+    
+            // Retrieve guild name and scope from the row data
+            const guildName = row[headers.indexOf('Guild Name')]?.trim();
+            const guildScope = guildScopeIndex !== -1 ? row[guildScopeIndex]?.trim() : 'Unknown';
+    
+            // Create the new thread with the correct arguments
+            if (guildName) {
+                await this.createGuildRecruitmentThread(channel, guildName, guildScope, messageOptions);
+                console.log(colorize(`[${channel.name}] Reposted thread: ${guildName}`, COLORS.GREEN));
+            } else {
+                console.error('Guild Name is missing in the row data.');
+            }
         } catch (error) {
             console.error(`Failed to handle thread reposting: ${error}`);
         }
@@ -455,15 +539,25 @@ export class ServerManager {
             console.log(colorize(`\n\nStarting to check ${channel.name} for threads that need reposting...`, COLORS.YELLOW));
     
             try {
+                // Fetch and filter threads that need reposting
                 const threadsPromise = manager.fetchAndFilterThreads(channel, thread => manager.needsRepost(thread));
                 const timeoutPromise = new Promise<ThreadChannel[]>((_, reject) =>
                     setTimeout(() => reject(new Error('Fetching threads timed out')), timeoutDuration)
                 );
     
-                const threads = await Promise.race([threadsPromise, timeoutPromise]);
+                // Race the promises and get the threads
+                let threads = await Promise.race([threadsPromise, timeoutPromise]);
     
                 console.log(`[${channel.name}] Found ${threads.length} threads over the age limit.`);
     
+                // Sort threads by their creation date (oldest first), accounting for null/undefined values
+                threads = threads.sort((a, b) => {
+                    const dateA = a.createdAt ? a.createdAt.getTime() : 0;
+                    const dateB = b.createdAt ? b.createdAt.getTime() : 0;
+                    return dateA - dateB;
+                });
+    
+                // Get spreadsheet data
                 const rows = await manager.getSpreadsheetData();
                 const headers = rows[0];
                 const guildNameIndex = headers.indexOf('Guild Name');
@@ -476,18 +570,36 @@ export class ServerManager {
                 for (const thread of threads) {
                     if (hasTimeoutOccurred) break; // Exit loop if timeout has occurred
     
-                    const row = rows.slice(1).find(r => r[guildNameIndex]?.trim() === thread.name.trim());
-                    if (!row || manager.isEntryTooOld(row[headers.indexOf('Timestamp')])) continue;
+                    const threadNameLower = thread.name.trim().toLowerCase();
+    
+                    // Find the row where the guild name is contained within the thread name (case-insensitive)
+                    const row = rows.slice(1).find(r => {
+                        const guildName = r[guildNameIndex]?.trim().toLowerCase();
+                        return guildName && threadNameLower.includes(guildName);
+                    });
+    
+                    if (!row) {
+                        console.log(`[DEBUG] No matching row found for thread ${thread.name}. Skipping.`);
+                        continue;
+                    }
+    
+                    if (manager.isEntryTooOld(row[headers.indexOf('Timestamp')])) {
+                        console.log(`[DEBUG] Entry for thread ${thread.name} is too old. Skipping.`);
+                        continue;
+                    }
     
                     try {
+                        // Try to repost the thread
                         const repostPromise = manager.handleThreadReposting(channel, thread, row, headers);
                         const repostTimeoutPromise = new Promise<void>((_, reject) =>
                             setTimeout(() => reject(new Error('Reposting thread timed out')), timeoutDuration)
                         );
     
+                        // Race the reposting promise with a timeout
                         await Promise.race([repostPromise, repostTimeoutPromise]);
                         repostedCount++;
                         break; // Repost only the oldest thread
+    
                     } catch (error) {
                         if (error instanceof Error) {
                             if (error.message.includes('Reposting thread timed out')) {
@@ -514,9 +626,11 @@ export class ServerManager {
             }
         }
     
+        // Reposting for both channels
         await handleReposting(allianceChannel, this.config, this);
         await handleReposting(hordeChannel, this.config, this);
     }
+    
 
     public async postNewEntries(allianceChannel: ForumChannel, hordeChannel: ForumChannel) {
         let newPostsAdded = 0;
@@ -530,8 +644,9 @@ export class ServerManager {
             const factionIndex = headers.indexOf('Faction');
             const guildNameIndex = headers.indexOf('Guild Name');
             const timestampIndex = headers.indexOf('Timestamp');
+            const guildScopeIndex = headers.indexOf('Guild Type'); // Assuming this is the correct column header
     
-            if (factionIndex === -1 || guildNameIndex === -1 || timestampIndex === -1) {
+            if (factionIndex === -1 || guildNameIndex === -1 || timestampIndex === -1 || guildScopeIndex === -1) {
                 console.error('Required columns not found in Google Sheets data.');
                 return;
             }
@@ -542,22 +657,28 @@ export class ServerManager {
                 this.fetchAndFilterThreads(hordeChannel, () => true),
             ]);
     
-            const existingThreadNames = new Set([
+            // Combine all thread names into one array and convert to lowercase for case-insensitive comparison
+            const existingThreadNames = [
                 ...existingThreads[0].map(thread => thread.name.trim().toLowerCase()),
                 ...existingThreads[1].map(thread => thread.name.trim().toLowerCase())
-            ]);
+            ];
     
             // Fetch the maximum number of new threads allowed per cycle from the config
             const maxNewThreads = this.config.MAX_NEW_THREADS_PER_CYCLE || 10;
     
-            // First pass: Identify new guild names
+            // First pass: Identify new guild names by checking if they are not contained in any existing thread title
             const newGuildNames = new Set<string>();
     
             for (const row of rows.slice(1)) {
-                const threadName = row[guildNameIndex]?.trim();
+                const guildName = row[guildNameIndex]?.trim();
     
-                if (threadName && !existingThreadNames.has(threadName.trim().toLowerCase())) {
-                    newGuildNames.add(threadName.trim());
+                if (guildName) {
+                    const guildNameLower = guildName.toLowerCase();
+                    const threadExists = existingThreadNames.some(threadName => threadName.includes(guildNameLower));
+                    
+                    if (!threadExists) {
+                        newGuildNames.add(guildName.trim());
+                    }
                 }
             }
     
@@ -567,15 +688,16 @@ export class ServerManager {
                 return;
             }
     
-            // Second pass: Process rows for new guild names
+            // Second pass: Process rows for new guild names and create threads if necessary
             for (const row of rows.slice(1)) {
                 if (hasTimeoutOccurred || newPostsAdded >= maxNewThreads) break; // Exit loop if timeout or max posts reached
     
-                const threadName = row[guildNameIndex]?.trim();
+                const guildName = row[guildNameIndex]?.trim();
                 const faction = row[factionIndex]?.trim();
                 const timestamp = row[timestampIndex]?.trim();
+                const guildScope = row[guildScopeIndex]?.trim(); // Get guildScope from row
     
-                if (!threadName || !newGuildNames.has(threadName) || this.isEntryTooOld(timestamp)) continue;
+                if (!guildName || !newGuildNames.has(guildName) || this.isEntryTooOld(timestamp)) continue;
     
                 const targetChannel = faction === 'Alliance' ? allianceChannel : faction === 'Horde' ? hordeChannel : null;
                 if (!targetChannel) continue;
@@ -583,14 +705,14 @@ export class ServerManager {
                 const messageOptions = await this.generateMessageContent(headers, row);
     
                 try {
-                    const threadCreationPromise = this.createGuildRecruitmentThread(targetChannel, threadName, messageOptions);
+                    const threadCreationPromise = this.createGuildRecruitmentThread(targetChannel, guildName, guildScope, messageOptions);
                     const timeoutPromise = new Promise<ThreadChannel>((_, reject) =>
                         setTimeout(() => reject(new Error('Thread creation timed out')), 10000)
                     );
     
                     const thread = await Promise.race([threadCreationPromise, timeoutPromise]);
     
-                    console.log(colorize(`[${targetChannel.name}] Added new thread: ${threadName}`, COLORS.GREEN));
+                    console.log(colorize(`[${targetChannel.name}] Added new thread: ${guildName}`, COLORS.GREEN));
                     newPostsAdded++;
     
                     // Stop creating new threads if we hit the limit for this cycle
@@ -598,7 +720,7 @@ export class ServerManager {
                         console.log(colorize(`Reached the limit of ${maxNewThreads} new threads for this cycle.`, COLORS.YELLOW));
                         break;
                     }
-                } catch (error) {
+                } catch (error: unknown) {
                     if (error instanceof Error) {
                         if (error.message.includes('Thread creation timed out')) {
                             console.error('Thread creation timed out due to rate limit. Stopping further posts.');
@@ -610,6 +732,7 @@ export class ServerManager {
                             await new Promise(resolve => setTimeout(resolve, delay));
                         } else {
                             console.error(`Failed to create thread due to error: ${error.message}`);
+                            console.error(error.stack); // Log the stack trace for debugging
                             continue; // Continue to the next row if error persists
                         }
                     } else {
@@ -623,8 +746,14 @@ export class ServerManager {
             } else {
                 console.log(`Total new posts added: ${newPostsAdded}`);
             }
-        } catch (error) {
-            console.error(`Failed to post new entries: ${error}`);
+        } catch (error: unknown) {
+            console.error('Failed to post new entries due to an unexpected error.');
+            if (error instanceof Error) {
+                console.error(error.message); // Log the specific error message
+                console.error(error.stack); // Log the stack trace for debugging
+            } else {
+                console.error(`An unknown error occurred: ${String(error)}`);
+            }
         }
     }     
 }
