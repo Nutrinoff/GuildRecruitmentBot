@@ -674,8 +674,11 @@ export class ServerManager {
     
                 if (guildName) {
                     const guildNameLower = guildName.toLowerCase();
-                    const threadExists = existingThreadNames.some(threadName => threadName.includes(guildNameLower));
-                    
+                    const threadExists = existingThreadNames.some(threadName => {
+                        const regex = new RegExp(`^<${guildNameLower}>`, 'i'); // Match the exact guild name at the start of the thread title
+                        const exists = regex.test(threadName);
+                        return exists;
+                    });
                     if (!threadExists) {
                         newGuildNames.add(guildName.trim());
                     }
